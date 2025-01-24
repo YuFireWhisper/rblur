@@ -1,18 +1,51 @@
+use core::fmt;
 use std::{
     collections::VecDeque,
+    error::Error,
     sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
+use once_cell::sync::Lazy;
+
+#[derive(Debug)]
 pub enum ThreadPoolError {
     QueueFull,
 }
 
+impl fmt::Display for ThreadPoolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ThreadPoolError::QueueFull => write!(f, "Thread pool task queue is full"),
+        }
+    }
+}
+
+impl Error for ThreadPoolError {}
+
 pub struct ThreadPoolConfig {
-    keep_alive: Duration,
-    max_threads: usize,
-    max_queue_size: usize, // 0 則為無界
+    pub keep_alive: Duration,
+    pub max_threads: usize,
+    pub max_queue_size: usize, // 0 則為無界
+}
+
+impl Default for ThreadPoolConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThreadPoolConfig {
+    pub fn new() -> Self {
+        Self {
+            keep_alive: Duration::from_secs(30),
+            max_threads: std::thread::available_parallelism()
+                .map(|n| n.get() * 2)
+                .unwrap_or(8),
+            max_queue_size: 10000,
+        }
+    }
 }
 
 type Task = Box<dyn FnOnce() + Send + 'static>;
@@ -29,6 +62,9 @@ pub struct ThreadPool {
     max_threads: usize,
     max_queue_size: usize,
 }
+
+pub static THREAD_POOL: Lazy<Mutex<ThreadPool>> =
+    Lazy::new(|| Mutex::new(ThreadPool::new(ThreadPoolConfig::new())));
 
 impl ThreadPool {
     pub fn new(config: ThreadPoolConfig) -> Self {

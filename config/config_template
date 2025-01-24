@@ -1,0 +1,9 @@
+http {
+  server {
+    listen 0.0.0.0:8080;
+
+    location /hi {
+      static_file /home/yuwhisper/projects/blur/index.html; 
+    }
+  }
+}

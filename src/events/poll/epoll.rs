@@ -14,9 +14,12 @@ impl EPoll {
             return Err(io::Error::last_os_error());
         }
 
+        let mut events = Vec::with_capacity(1024);
+        events.resize(1024, unsafe { std::mem::zeroed() });
+
         Ok(Self {
             epoll_fd,
-            events: Vec::with_capacity(1024),
+            events,
         })
     }
 }
@@ -24,7 +27,7 @@ impl EPoll {
 impl PollImpl for EPoll {
     fn add(&mut self, fd: RawFd) -> io::Result<()> {
         let mut event: libc::epoll_event = unsafe { std::mem::zeroed() };
-        event.events = (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLERR) as u32;
+        event.events = (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLERR | libc::EPOLLET) as u32;
         event.u64 = fd as u64;
 
         if unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event) } < 0 {
@@ -61,12 +64,15 @@ impl PollImpl for EPoll {
             let fd = event.u64 as RawFd;
 
             if (event.events & libc::EPOLLIN as u32) != 0 {
+                println!("read");
                 events.push((fd, EventType::Read));
             }
             if (event.events & libc::EPOLLOUT as u32) != 0 {
+                println!("write");
                 events.push((fd, EventType::Write));
             }
             if (event.events & (libc::EPOLLERR as u32 | libc::EPOLLHUP as u32)) != 0 {
+                println!("error");
                 events.push((fd, EventType::Error));
             }
         }

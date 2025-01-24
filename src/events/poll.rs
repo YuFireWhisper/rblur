@@ -15,7 +15,7 @@ pub trait EventHandler: Send + Sync {
     fn handle(&self, fd: RawFd, event_type: EventType) -> io::Result<()>;
 }
 
-pub trait PollImpl {
+pub trait PollImpl: Send {
     fn add(&mut self, fd: RawFd) -> io::Result<()>;
     fn remove(&mut self, fd: RawFd) -> io::Result<()>;
     fn poll(&mut self, timeout: Option<std::time::Duration>)
@@ -48,14 +48,23 @@ impl Poll {
         event_type: EventType,
         handler: Box<dyn EventHandler>,
     ) -> io::Result<()> {
+        println!("===== Poll Handler info =====");
+        print!("Have:");
+        for key in self.handlers.keys() {
+            println!("{key} ");
+        }
+        if !self.handlers.contains_key(&fd) {
+            println!("Input fd: {fd}, status: NOT contains");
+            self.implementation.add(fd)?;
+        } else {
+            println!("Input fd: {fd}, status: contains");
+        }
+        println!("=============================");
+
         self.handlers
             .entry(fd)
             .or_default()
-            .insert(event_type, handler);
-
-        if !self.handlers.contains_key(&fd) {
-            self.implementation.add(fd)?;
-        }
+            .insert(event_type, handler);        
         Ok(())
     }
 
