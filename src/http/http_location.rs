@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     core::config::{
-        command::Command, config_context::ConfigContext, config_file_parser::ConfigFileParser,
+        command::Command, config_context::ConfigContext, config_file_parser::parse_context_of,
     },
     register_commands,
 };
@@ -37,13 +37,14 @@ pub fn handle_create_location(ctx: &mut ConfigContext) {
     let prev_ctx = ctx.current_ctx.take();
     let prev_block_type_id = ctx.current_block_type_id.take();
 
-    ctx.current_ctx = Some(get_context_u8(&mut HttpLocationContext::new()));
+    let location_ctx = Box::new(HttpLocationContext::new());
+    let location_ctx = Box::leak(location_ctx); // 防止被释放
+    location_ctx.path = path.clone();
+
+    ctx.current_ctx = Some(get_context_u8(location_ctx));
     ctx.current_block_type_id = Some(TypeId::of::<HttpLocationContext>());
 
-    {
-        let mut parser = ConfigFileParser::instance().lock().unwrap();
-        parser.parse(ctx).unwrap();
-    }
+    parse_context_of(ctx).unwrap();
 
     if let Some(srv_ctx_ptr) = &prev_ctx {
         let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
@@ -60,7 +61,8 @@ pub fn handle_create_location(ctx: &mut ConfigContext) {
 }
 
 pub fn handle_set_static_file(ctx: &mut ConfigContext) {
-    let file_path = ctx.current_cmd_args[0].clone();
+    let file_path = ctx.current_cmd_args[1].clone();
+    println!("靜態文件路徑為: {file_path}");
     if let Some(loc_ctx_ptr) = &ctx.current_ctx {
         let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
         let ctn = Arc::new(fs::read_to_string(&file_path).unwrap());

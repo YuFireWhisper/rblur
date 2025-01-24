@@ -1,11 +1,13 @@
-use std::{any::TypeId, collections::HashMap, rc::Rc, sync::Arc, thread};
+use std::{any::TypeId, collections::HashMap, rc::Rc, sync::{atomic::AtomicPtr, Arc}, thread};
 
-use crate::{core::config::{command::Command, config_context::ConfigContext, config_file_parser::ConfigFileParser}, register_commands};
-
-use super::{
-    get_context_u8,
-    http_server::{HttpServer, HttpServerContext},
+use crate::{
+    core::config::{
+        command::Command, config_context::ConfigContext, config_file_parser::parse_context_of,
+    },
+    register_commands,
 };
+
+use super::http_server::{HttpServer, HttpServerContext};
 
 register_commands!(Command::new("http", vec![], handle_create_http),);
 
@@ -14,22 +16,23 @@ pub fn handle_create_http(ctx: &mut ConfigContext) {
     let prev_ctx = ctx.current_ctx.take();
     let prev_block_type_id = ctx.current_block_type_id.take();
 
-    ctx.current_ctx = Some(get_context_u8(&mut HttpContext::new()));
+    let http_ctx = Box::new(HttpContext::new());
+    let http_ctx_ptr = Box::into_raw(http_ctx);
+    
+    ctx.current_ctx = Some(AtomicPtr::new(http_ctx_ptr as *mut u8));
     ctx.current_block_type_id = Some(TypeId::of::<HttpContext>());
 
-    {
-        let mut parse = ConfigFileParser::instance().lock().unwrap();
-        parse.parse(ctx).unwrap();
-    }
+    parse_context_of(ctx).expect("Error at handle_create_http");
 
-    ctx.spare2 = ctx.current_ctx.take(); // For Main
+    ctx.spare2 = ctx.current_ctx.take();
+    
     ctx.current_ctx = prev_ctx;
     ctx.current_block_type_id = prev_block_type_id;
 }
 
 #[derive(Default)]
 pub struct HttpContext {
-    servers: HashMap<String, Arc<HttpServerContext>>,
+    pub servers: HashMap<String, Arc<HttpServerContext>>,
 }
 
 impl HttpContext {

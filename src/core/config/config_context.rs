@@ -1,32 +1,36 @@
-use std::{
-    any::TypeId,
-    sync::atomic::{AtomicPtr, Ordering},
-};
+use std::{any::TypeId, fs::File, io::BufReader, sync::atomic::AtomicPtr};
 
-type BlockEndCallback = Box<dyn FnOnce(&mut ConfigContext) + Send + Sync>;
-
-#[derive(Default)]
 pub struct ConfigContext {
     pub current_cmd_name: String,
     pub current_cmd_args: Vec<String>,
     pub current_block_type_id: Option<TypeId>,
     pub current_ctx: Option<AtomicPtr<u8>>,
-    pub block_end_callback: Option<BlockEndCallback>,
     pub spare1: Option<AtomicPtr<u8>>,
     pub spare2: Option<AtomicPtr<u8>>,
     pub spare3: Option<AtomicPtr<u8>>,
     pub spare4: Option<AtomicPtr<u8>>,
     pub spare5: Option<AtomicPtr<u8>>,
+    pub reader: BufReader<File>,
+    pub parse_pos: u64,
 }
 
 impl ConfigContext {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new(path: &str) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
 
-    pub fn clone_current_ctx(&self) -> Option<AtomicPtr<u8>> {
-        self.current_ctx
-            .as_ref()
-            .map(|p| AtomicPtr::new(p.load(Ordering::SeqCst)))
+        Ok(ConfigContext {
+            current_cmd_name: String::new(),
+            current_cmd_args: Vec::new(),
+            current_block_type_id: None,
+            current_ctx: None,
+            spare1: None,
+            spare2: None,
+            spare3: None,
+            spare4: None,
+            spare5: None,
+            reader,
+            parse_pos: 0,
+        })
     }
 }

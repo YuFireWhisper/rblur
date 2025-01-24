@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::io;
-use std::sync::{Arc, OnceLock, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use super::config_file_parser::ConfigFileParser;
 use super::command::Command;
 
 static REGISTERED_COMMANDS: OnceLock<Mutex<Vec<Command>>> = OnceLock::new();
@@ -32,7 +30,7 @@ macro_rules! register_commands {
             init
         };
     };
-    
+
     ($($cmd:expr),+ $(,)?) => {
         #[used]
         #[link_section = ".init_array"]
@@ -81,9 +79,5 @@ impl ConfigManager {
 
     pub fn get_command(name: &str) -> Option<&'static Command> {
         Self::instance().commands.get(name)
-    }
-
-    pub fn init_parser(&mut self, path: &str) -> io::Result<()> {
-        ConfigFileParser::init(path)
     }
 }
