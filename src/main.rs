@@ -1,5 +1,6 @@
+use std::sync::{atomic::Ordering, Arc};
+use std::thread;
 use std::time::Duration;
-use std::{rc::Rc, sync::atomic::Ordering, thread};
 
 use blur::{
     core::config::{
@@ -12,25 +13,24 @@ use blur::{
 fn main() {
     ConfigManager::init();
 
-    let mut ctx =
-        ConfigContext::new("/home/yuwhisper/projects/blur/config/config_template").unwrap();
+    let mut ctx = ConfigContext::new("/home/yuwhisper/projects/blur/config/config_template")
+        .expect("Failed to create config context");
 
-    parse_context_of(&mut ctx).unwrap();
-    println!("解析完畢");
+    parse_context_of(&mut ctx).expect("Failed to parse context");
+    println!("Configuration parsing complete");
 
     if let Some(http_ctx_ptr) = ctx.spare2.take() {
         let http_ptr = http_ctx_ptr.load(Ordering::SeqCst);
-        let http_ctx = unsafe { Rc::new(*Box::from_raw(http_ptr as *mut HttpContext)) };
+        let http_ctx = unsafe { Arc::new(*Box::from_raw(http_ptr as *mut HttpContext)) };
 
-        println!();
-        println!("Number of servers: {}", http_ctx.servers.len());
+        if let Ok(servers_count) = http_ctx.servers.lock() {
+            println!("\nNumber of servers: {}", servers_count.len());
+        }
 
-        let mut manager = HttpManager::new(&http_ctx);
+        let mut manager = HttpManager::new(http_ctx);
         manager.start();
 
-        while let Some(handle) = manager.server_handles.pop() {
-            handle.join().unwrap();
-        }
+        manager.join();
 
         loop {
             thread::sleep(Duration::from_secs(1));

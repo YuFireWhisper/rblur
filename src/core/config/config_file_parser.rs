@@ -6,14 +6,12 @@ use crate::get_command;
 use super::config_context::ConfigContext;
 
 pub fn parse_context_of(ctx: &mut ConfigContext) -> io::Result<()> {
-    println!("你好");
     while let Ok(status) = get_token_of(ctx) {
         match status {
             ParseStutus::BlockEnd => return Ok(()),
             ParseStutus::Finish => return Ok(()),
             _ => {
                 handler_command_of(ctx);
-                println!("處理完成");
             }
         }
     }
@@ -27,7 +25,6 @@ pub fn get_token_of(ctx: &mut ConfigContext) -> io::Result<ParseStutus> {
     let mut is_first = true;
 
     while let Ok(c) = get_u8_of(ctx) {
-        print!("{}", c as char);
         match c {
             c if c.is_ascii_whitespace() => {
                 if in_word {

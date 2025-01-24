@@ -5,7 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -46,18 +46,17 @@ register_commands!(
 );
 
 pub fn handle_create_server(ctx: &mut ConfigContext) {
-    println!("g");
     let prev_ctx = ctx.current_ctx.take();
     let prev_block_type_id = ctx.current_block_type_id.take();
 
-    let mut server_ctx = Box::new(HttpServerContext::new());
-    ctx.current_ctx = Some(get_context_u8(&mut *server_ctx));
+    let mut server_ctx = HttpServerContext::new();
+    ctx.current_ctx = Some(get_context_u8(&mut server_ctx));
     ctx.current_block_type_id = Some(TypeId::of::<HttpServerContext>());
 
     parse_context_of(ctx).unwrap();
 
-    let listen_addr = server_ctx.listen.clone();
-    let server_ctx = Arc::new(*server_ctx);
+    let listen_addr = server_ctx.listen().to_string();
+    let server_ctx = Arc::new(server_ctx);
 
     ctx.current_ctx = prev_ctx;
     ctx.current_block_type_id = prev_block_type_id;
@@ -65,7 +64,6 @@ pub fn handle_create_server(ctx: &mut ConfigContext) {
     if let Some(http_ctx_ptr) = &ctx.current_ctx {
         let http_ptr = http_ctx_ptr.load(Ordering::SeqCst);
         let http_ctx = unsafe { &mut *(http_ptr as *mut HttpContext) };
-
         http_ctx.set_server(&listen_addr, server_ctx);
     }
 }
@@ -76,7 +74,7 @@ pub fn handle_set_listen(ctx: &mut ConfigContext) {
         let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
         if !srv_ptr.is_null() {
             let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.listen = listen.into();
+            srv_ctx.set_listen(listen);
         }
     }
 }
@@ -86,35 +84,60 @@ pub fn handle_set_server_name(ctx: &mut ConfigContext) {
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
         let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
         let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-        srv_ctx.server_name.push(server_name.into());
+        srv_ctx.add_server_name(server_name);
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct HttpServerContext {
-    listen: String,
-    server_name: Vec<String>,
-    locations: HashMap<String, *mut u8>,
+    listen: Mutex<String>,
+    server_names: Mutex<Vec<String>>,
+    locations: Mutex<HashMap<String, Arc<HttpLocationContext>>>,
 }
 
 impl HttpServerContext {
     pub fn new() -> Self {
         Self {
-            listen: "127.0.0.1:8080".to_string(),
-            server_name: Vec::new(),
-            locations: HashMap::new(),
+            listen: Mutex::new("127.0.0.1:8080".to_string()),
+            server_names: Mutex::new(Vec::new()),
+            locations: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn set_location(&mut self, path: &str, ctx: *mut u8) {
-        self.locations.insert(path.to_string(), ctx);
+    pub fn set_listen(&self, addr: &str) {
+        if let Ok(mut listen) = self.listen.lock() {
+            *listen = addr.to_string();
+        }
     }
 
-    pub fn find_server_name(&self, server_name: &str) -> Option<Arc<HttpServerContext>> {
-        if self.server_name.contains(&server_name.to_string()) {
-            return Some(Arc::new(self.clone()));
+    pub fn listen(&self) -> String {
+        self.listen.lock().unwrap().clone()
+    }
+
+    pub fn add_server_name(&self, name: &str) {
+        if let Ok(mut names) = self.server_names.lock() {
+            names.push(name.to_string());
         }
-        None
+    }
+
+    pub fn set_location(&self, path: &str, ctx: *mut u8) {
+        if let Ok(mut locations) = self.locations.lock() {
+            let location_ctx = unsafe { &*(ctx as *const HttpLocationContext) };
+            locations.insert(path.to_string(), Arc::new(location_ctx.clone()));
+        }
+    }
+
+    pub fn find_server_name(&self, server_name: &str) -> Option<bool> {
+        self.server_names.lock().ok()
+            .map(|names| names.contains(&server_name.to_string()))
+    }
+    
+    pub fn get_locations(&self) -> Vec<(String, Arc<HttpLocationContext>)> {
+        self.locations.lock()
+            .map(|locations| locations.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+            .unwrap_or_default()
     }
 }
 
@@ -128,27 +151,19 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub fn new(ctx: &Arc<HttpServerContext>) -> Self {
-        let locations = ctx
-            .locations
-            .iter()
-            .map(|(path, &ptr)| {
-                let location_ctx = unsafe { &*(ptr as *const HttpLocationContext) };
-                (path.clone(), Arc::new(location_ctx.clone()))
-            })
-            .collect();
-
-        let listen = ctx.listen.clone();
-        println!("監聽: {listen}");
+        let locations = Arc::new(ctx.get_locations());
+        let listen = ctx.listen();
+        println!("Listening on: {listen}");
 
         Self {
-            listener: TcpListener::bind(&ctx.listen).unwrap(),
+            listener: TcpListener::bind(&listen).unwrap(),
             ctx: ctx.clone(),
-            locations: Arc::new(locations),
+            locations,
         }
     }
 
     pub fn start(self) -> thread::JoinHandle<()> {
-        println!("Server listening on {}", self.ctx.listen);
+        println!("Server listening on {}", self.ctx.listen());
 
         thread::spawn(move || {
             self.listener.set_nonblocking(true).unwrap();
@@ -158,16 +173,12 @@ impl HttpServer {
                 return;
             }
 
-            for (path, _) in &*self.locations {
-                println!("Configured location: {}", path);
-            }
-
             while RUNNING.load(Ordering::SeqCst) {
                 match self.listener.incoming().next() {
                     Some(Ok(stream)) => {
                         let mut stream = stream;
                         let from = stream.peer_addr().unwrap().to_string();
-                        println!("流量: {from}");
+                        println!("Traffic from: {from}");
                         let locations = self.locations.clone();
 
                         if let Ok(pool) = THREAD_POOL.lock() {
@@ -194,7 +205,7 @@ impl HttpServer {
 
 fn handle_connection(
     stream: &mut TcpStream,
-    locations: &Arc<Vec<(String, Arc<HttpLocationContext>)>>,
+    locations: &[(String, Arc<HttpLocationContext>)],
 ) -> std::io::Result<()> {
     let mut buffer = [0; 1024];
     let n = stream.read(&mut buffer)?;
@@ -202,10 +213,8 @@ fn handle_connection(
         return Ok(());
     }
 
-    let request = String::from_utf8_lossy(&buffer);
+    let request = String::from_utf8_lossy(&buffer[..n]);
     let path = parse_request_path(&request);
-
-    println!("Request path: {path}");
 
     let response = locations
         .iter()
