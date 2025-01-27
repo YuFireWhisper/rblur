@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicPtr, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -24,6 +24,7 @@ use super::{
     http_location::{HttpLocation, HttpLocationContext},
     http_manager::HttpContext,
     http_response::HttpResponse,
+    http_ssl::HttpSSLContext,
     http_type::HttpVersion,
 };
 
@@ -42,7 +43,7 @@ register_commands!(
         "server_name",
         vec![TypeId::of::<HttpServerContext>()],
         handle_set_server_name
-    )
+    ),
 );
 
 pub fn handle_create_server(ctx: &mut ConfigContext) {
@@ -88,11 +89,21 @@ pub fn handle_set_server_name(ctx: &mut ConfigContext) {
     }
 }
 
+pub fn get_server_ctx(current_ctx: &Option<AtomicPtr<u8>>) -> Option<&mut HttpServerContext> {
+    if let Some(srv_ctx_ptr) = current_ctx {
+        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
+        return Some(unsafe { &mut *(srv_ptr as *mut HttpServerContext) });
+    }
+
+    None
+}
+
 #[derive(Default)]
 pub struct HttpServerContext {
     listen: Mutex<String>,
     server_names: Mutex<Vec<String>>,
     locations: Mutex<HashMap<String, Arc<HttpLocationContext>>>,
+    ssl: Option<Mutex<HttpSSLContext>>,
 }
 
 impl HttpServerContext {
@@ -101,6 +112,7 @@ impl HttpServerContext {
             listen: Mutex::new("127.0.0.1:8080".to_string()),
             server_names: Mutex::new(Vec::new()),
             locations: Mutex::new(HashMap::new()),
+            ssl: None,
         }
     }
 
@@ -128,16 +140,26 @@ impl HttpServerContext {
     }
 
     pub fn find_server_name(&self, server_name: &str) -> Option<bool> {
-        self.server_names.lock().ok()
+        self.server_names
+            .lock()
+            .ok()
             .map(|names| names.contains(&server_name.to_string()))
     }
-    
+
     pub fn get_locations(&self) -> Vec<(String, Arc<HttpLocationContext>)> {
-        self.locations.lock()
-            .map(|locations| locations.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect())
+        self.locations
+            .lock()
+            .map(|locations| {
+                locations
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    pub fn set_ssl(&mut self, ctx: HttpSSLContext) {
+        self.ssl = Some(Mutex::new(ctx));
     }
 }
 

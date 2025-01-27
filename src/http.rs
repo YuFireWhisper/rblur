@@ -5,6 +5,7 @@ pub mod http_manager;
 pub mod http_request;
 pub mod http_response;
 pub mod http_server;
+pub mod http_ssl;
 pub mod http_type;
 
 fn find_line_end(buf: &[u8]) -> Option<usize> {
