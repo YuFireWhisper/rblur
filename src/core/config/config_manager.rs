@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
+
+use thiserror::Error;
 
 use super::command::Command;
 
@@ -79,5 +82,31 @@ impl ConfigManager {
 
     pub fn get_command(name: &str) -> Option<&'static Command> {
         Self::instance().commands.get(name)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum SetFieldError {
+    #[error("Invalid value for bool field: {0}")]
+    InvalidBoolValue(String),
+    #[error("Invalid value for field: {0}")]
+    InvalidValue(String),
+}
+
+pub fn set_field<T, U: FromStr>(
+    target: &mut T,
+    field_accessor: impl FnOnce(&mut T) -> &mut U,
+    value: &str,
+) -> Result<(), SetFieldError> {
+    let field = field_accessor(target);
+    *field = value.parse::<U>().map_err(|_| SetFieldError::InvalidValue(value.to_string()))?;
+    Ok(())
+}
+
+pub fn bool_str_to_bool(value: &str) -> Result<bool, SetFieldError> {
+    match value.to_lowercase().as_str() {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        _ => Err(SetFieldError::InvalidBoolValue(value.to_string())),
     }
 }

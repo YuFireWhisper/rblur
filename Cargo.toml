@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 once_cell = "1.20.2"
-acme-lib = "0.9.1"
 openssl = "0.10.68"
 chrono = "0.4.39"
+racme = "^0.1.2"
+thiserror = "^2.0.11"
