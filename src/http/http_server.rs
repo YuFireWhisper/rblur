@@ -1,8 +1,9 @@
+use rustls::pki_types::pem::PemObject;
 use std::{
     any::TypeId,
     collections::HashMap,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{
         atomic::{AtomicBool, AtomicPtr, Ordering},
         Arc, Mutex,
@@ -11,11 +12,17 @@ use std::{
     time::Duration,
 };
 
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    ServerConfig, ServerConnection,
+};
+
 use crate::{
     core::config::{
         command::Command, config_context::ConfigContext, config_file_parser::parse_context_of,
     },
     events::thread_pool::THREAD_POOL,
+    http::http_ssl::HttpSSL,
     register_commands,
 };
 
@@ -102,8 +109,9 @@ pub fn get_server_ctx(current_ctx: &Option<AtomicPtr<u8>>) -> Option<&mut HttpSe
 pub struct HttpServerContext {
     listen: Mutex<String>,
     server_names: Mutex<Vec<String>>,
+    http_version: Mutex<HttpVersion>,
     locations: Mutex<HashMap<String, Arc<HttpLocationContext>>>,
-    ssl: Option<Mutex<HttpSSLContext>>,
+    ssl: Mutex<Option<HttpSSLContext>>,
 }
 
 impl HttpServerContext {
@@ -112,7 +120,8 @@ impl HttpServerContext {
             listen: Mutex::new("127.0.0.1:8080".to_string()),
             server_names: Mutex::new(Vec::new()),
             locations: Mutex::new(HashMap::new()),
-            ssl: None,
+            http_version: Mutex::new(HttpVersion::default()),
+            ssl: Mutex::new(None),
         }
     }
 
@@ -139,13 +148,6 @@ impl HttpServerContext {
         }
     }
 
-    pub fn find_server_name(&self, server_name: &str) -> Option<bool> {
-        self.server_names
-            .lock()
-            .ok()
-            .map(|names| names.contains(&server_name.to_string()))
-    }
-
     pub fn get_locations(&self) -> Vec<(String, Arc<HttpLocationContext>)> {
         self.locations
             .lock()
@@ -158,8 +160,23 @@ impl HttpServerContext {
             .unwrap_or_default()
     }
 
-    pub fn set_ssl(&mut self, ctx: HttpSSLContext) {
-        self.ssl = Some(Mutex::new(ctx));
+    pub fn find_server_name(&self, server_name: &str) -> Option<bool> {
+        self.server_names
+            .lock()
+            .ok()
+            .map(|names| names.contains(&server_name.to_string()))
+    }
+
+    pub fn set_http_version(&self, version: HttpVersion) {
+        if let Ok(mut v) = self.http_version.lock() {
+            *v = version;
+        }
+    }
+
+    pub fn set_ssl(&self, ssl: HttpSSLContext) {
+        if let Ok(mut ssl_ctx) = self.ssl.lock() {
+            *ssl_ctx = Some(ssl);
+        }
     }
 }
 
@@ -167,26 +184,53 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 
 pub struct HttpServer {
     listener: TcpListener,
-    ctx: Arc<HttpServerContext>,
+    http_version: Arc<HttpVersion>,
     locations: Arc<Vec<(String, Arc<HttpLocationContext>)>>,
+    ssl: Option<Arc<ServerConfig>>,
 }
 
 impl HttpServer {
     pub fn new(ctx: &Arc<HttpServerContext>) -> Self {
-        let locations = Arc::new(ctx.get_locations());
         let listen = ctx.listen();
-        println!("Listening on: {listen}");
+        println!("Listening on: {}", listen);
+
+        let http_version = Arc::new(ctx.http_version.lock().unwrap().clone());
+        let locations = Arc::new(ctx.get_locations());
+        let ssl = {
+            let ssl_guard = ctx.ssl.lock().unwrap();
+            if ssl_guard.is_none() {
+                None
+            } else {
+                let ssl_ctx = ssl_guard.as_ref().unwrap();
+                let ssl = HttpSSL::new(ssl_ctx).unwrap();
+                let pem_key = ssl.cert_key.pri_key.private_key_to_pem_pkcs8().unwrap();
+                let pri_key =
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from_pem_slice(&pem_key).unwrap());
+
+                let pem_cert = ssl.cert.cert.to_pem().unwrap();
+                let cert = CertificateDer::from_pem_slice(&pem_cert).unwrap();
+
+                let config = ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(vec![cert], pri_key)
+                    .unwrap();
+
+                Some(Arc::new(config))
+            }
+        };
+
+        println!("SSL enabled: {}", ssl.is_some());
 
         Self {
-            listener: TcpListener::bind(&listen).unwrap(),
-            ctx: ctx.clone(),
+            listener: TcpListener::bind(listen).unwrap(),
+            http_version,
             locations,
+            ssl,
         }
     }
 
     pub fn start(self) -> thread::JoinHandle<()> {
-        println!("Server listening on {}", self.ctx.listen());
-
+        println!("Server started");
         thread::spawn(move || {
             self.listener.set_nonblocking(true).unwrap();
 
@@ -197,15 +241,45 @@ impl HttpServer {
 
             while RUNNING.load(Ordering::SeqCst) {
                 match self.listener.incoming().next() {
-                    Some(Ok(stream)) => {
-                        let mut stream = stream;
+                    Some(Ok(mut stream)) => {
                         let from = stream.peer_addr().unwrap().to_string();
                         println!("Traffic from: {from}");
+
                         let locations = self.locations.clone();
+                        let http_version = self.http_version.clone();
+                        let ssl_config = self.ssl.clone();
 
                         if let Ok(pool) = THREAD_POOL.lock() {
                             if let Err(e) = pool.spawn(move || {
-                                if let Err(e) = handle_connection(&mut stream, &locations) {
+                                if let Some(ssl_config) = ssl_config {
+                                    let mut conn = match ServerConnection::new(ssl_config) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            eprintln!("Failed to create TLS connection: {}", e);
+                                            return;
+                                        }
+                                    };
+
+                                    let mut tls_stream =
+                                        rustls::Stream::new(&mut conn, &mut stream);
+
+                                    match tls_stream.flush() {
+                                        Ok(_) => {
+                                            if let Err(e) = handle_connection(
+                                                &mut tls_stream,
+                                                &locations,
+                                                &http_version,
+                                            ) {
+                                                eprintln!("Error handling TLS connection: {}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("TLS handshake error: {}", e);
+                                        }
+                                    }
+                                } else if let Err(e) =
+                                    handle_connection(&mut stream, &locations, &http_version)
+                                {
                                     eprintln!("Error handling connection: {}", e);
                                 }
                             }) {
@@ -225,9 +299,10 @@ impl HttpServer {
     }
 }
 
-fn handle_connection(
-    stream: &mut TcpStream,
+fn handle_connection<S: Read + Write>(
+    stream: &mut S,
     locations: &[(String, Arc<HttpLocationContext>)],
+    http_version: &HttpVersion,
 ) -> std::io::Result<()> {
     let mut buffer = [0; 1024];
     let n = stream.read(&mut buffer)?;
@@ -242,7 +317,7 @@ fn handle_connection(
         .iter()
         .find(|(loc_path, _)| path == loc_path)
         .and_then(|(_, ctx)| HttpLocation::new((**ctx).clone()).handle(200))
-        .unwrap_or_else(create_404_response);
+        .unwrap_or_else(|| create_404_response(http_version));
 
     let response_string = format!(
         "{}\r\n{}{}",
@@ -263,9 +338,9 @@ fn parse_request_path(request: &str) -> &str {
         .unwrap_or("/")
 }
 
-fn create_404_response() -> HttpResponse {
+fn create_404_response(http_version: &HttpVersion) -> HttpResponse {
     let mut response = HttpResponse::new();
-    response.set_status_line(HttpVersion::Http1_1, 404);
+    response.set_status_line(http_version.clone(), 404);
     response.set_header("Content-Type", "text/plain");
     response.set_body("404 Not Found");
     response

@@ -1,15 +1,16 @@
 use std::{
     any::TypeId,
+    ptr,
     str::FromStr,
     sync::atomic::{AtomicPtr, Ordering},
+    time::Duration,
 };
 
 use racme::{
-    account::Account,
-    certificate::Certificate,
-    challenge::ChallengeType,
+    account::{Account, AccountBuilder},
+    certificate::{Certificate, CertificateError},
     key_pair::KeyPair,
-    order::{DnsProvider, Order, OrderStatus},
+    order::{DnsProvider, Order, OrderError},
 };
 use thiserror::Error;
 
@@ -24,12 +25,22 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum HttpSSLError {
-    #[error("Order is pending and DNS provider is not set")]
-    OrderPending,
-    #[error("Order is invalid, please restart the server")]
-    OrderInvalid,
     #[error("SSL is not enabled")]
     SSLNotEnabled,
+    #[error("Email empty")]
+    EmailEmpty,
+    #[error("Domain empty")]
+    DomainEmpty,
+    #[error("Order error: {0}")]
+    OrderError(Box<OrderError>),
+    #[error("Certificate error: {0}")]
+    CertificateError(#[from] CertificateError),
+}
+
+impl From<OrderError> for HttpSSLError {
+    fn from(error: OrderError) -> Self {
+        HttpSSLError::OrderError(Box::new(error))
+    }
 }
 
 type Result<T> = std::result::Result<T, HttpSSLError>;
@@ -79,17 +90,29 @@ pub fn handle_create_ssl(ctx: &mut ConfigContext) {
         return;
     }
 
-    let prev_ctx = ctx.current_ctx.take();
+    let srv_ctx = ctx.current_ctx.take();
     let prev_block_type_id = ctx.current_block_type_id.take();
 
-    let ssl_ctx = Box::new(HttpSSLContext::new());
+    let mut ssl_ctx = Box::new(HttpSSLContext::new());
+    ssl_ctx.ssl = true;
 
     ctx.current_ctx = Some(AtomicPtr::new(Box::into_raw(ssl_ctx) as *mut u8));
     ctx.current_block_type_id = Some(TypeId::of::<HttpSSLContext>());
 
     parse_context_of(ctx).expect("Error at handle_create_ssl");
 
-    ctx.current_ctx = prev_ctx;
+    if let Some(srv_ctx_ptr) = &srv_ctx {
+        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
+        let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
+
+        if let Some(ssl_ctx_ptr) = ctx.current_ctx.take() {
+            let ssl_ptr = ssl_ctx_ptr.load(Ordering::SeqCst);
+            let ssl_ctx: HttpSSLContext = unsafe { ptr::read(ssl_ptr as *const HttpSSLContext) };
+            srv_ctx.set_ssl(ssl_ctx);
+        }
+    }
+
+    ctx.current_ctx = srv_ctx;
     ctx.current_block_type_id = prev_block_type_id;
 }
 
@@ -130,7 +153,7 @@ pub fn handle_set_ssl_dns_provider(ctx: &mut ConfigContext) {
     let provider = ctx.current_cmd_args.get(1).unwrap();
     let api_token = ctx.current_cmd_args.get(2).unwrap();
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
-        ssl_ctx.dns_provider = Some(DnsProvider::from_str(provider).unwrap());
+        ssl_ctx.dns_provider = DnsProvider::from_str(provider).unwrap();
         ssl_ctx.dns_provider_api_token = api_token.to_string();
     }
 }
@@ -152,14 +175,14 @@ fn get_ssl_ctx(ctx: &ConfigContext) -> Option<&mut HttpSSLContext> {
 }
 
 pub struct HttpSSLContext {
-    ssl: bool,
-    email: String,
-    domain: String,
-    auto_renew: bool,
-    renew_days: u32,
-    dns_provider: Option<DnsProvider>,
-    dns_provider_api_token: String,
-    dns_instructions_lang: String,
+    pub ssl: bool,
+    pub email: String,
+    pub domain: String,
+    pub auto_renew: bool,
+    pub renew_days: u32,
+    pub dns_provider: DnsProvider,
+    pub dns_provider_api_token: String,
+    pub dns_instructions_lang: String,
 }
 
 impl Default for HttpSSLContext {
@@ -170,7 +193,7 @@ impl Default for HttpSSLContext {
             domain: String::new(),
             auto_renew: true,
             renew_days: 30,
-            dns_provider: None,
+            dns_provider: DnsProvider::Default,
             dns_provider_api_token: String::new(),
             dns_instructions_lang: String::new(),
         }
@@ -184,96 +207,61 @@ impl HttpSSLContext {
 }
 
 pub struct HttpSSL {
-    ctx: HttpSSLContext,
-    account: Account,
+    pub cert_key: KeyPair,
+    pub cert: Certificate,
 }
 
 impl HttpSSL {
-    pub fn new(ctx: HttpSSLContext) -> Self {
-        if ctx.ssl {
-            if ctx.email.is_empty() {
-                panic!("ssl_email is required");
-            }
-            if ctx.domain.is_empty() {
-                panic!("ssl_domain is required");
-            }
-            if ctx.dns_provider.is_some() && ctx.dns_provider_api_token.is_empty() {
-                panic!("ssl_dns_provider_api_token is required");
-            }
-        }
-
-        let account = Account::new(&ctx.email).unwrap();
-        Self { ctx, account }
-    }
-
-    pub fn init(&mut self) -> Result<()> {
-        if !self.ctx.ssl {
+    pub fn new(ctx: &HttpSSLContext) -> Result<Self> {
+        if !ctx.ssl {
             return Err(HttpSSLError::SSLNotEnabled);
         }
-
-        let order = Order::new(&mut self.account, &self.ctx.domain).unwrap();
-
-        if order.status == OrderStatus::Valid {
-            return Ok(());
+        if ctx.email.is_empty() {
+            return Err(HttpSSLError::EmailEmpty);
+        }
+        if ctx.domain.is_empty() {
+            return Err(HttpSSLError::DomainEmpty);
         }
 
-        match order.status {
-            OrderStatus::Valid => {}
-            OrderStatus::Processing => self.handler_order_processing(order).unwrap(),
-            OrderStatus::Pending => self.handle_order_pending(order).unwrap(),
-            OrderStatus::Ready => self.handle_order_ready(order).unwrap(),
-            OrderStatus::Invalid => return Err(HttpSSLError::OrderInvalid),
-        }
-
-        let cert = self.account.get_certificate(&self.ctx.domain).unwrap();
-        if cert.should_renew(self.ctx.renew_days).unwrap() {
-            self.init().unwrap();
-        }
-
-        Ok(())
-    }
-
-    pub fn get_cert_key(&self) -> KeyPair {
-        self.account.get_cert_key(&self.ctx.domain).unwrap()
-    }
-
-    pub fn get_cert(&self) -> Certificate {
-        self.account.get_certificate(&self.ctx.domain).unwrap()
-    }
-
-    fn handle_order_pending(&self, order: Order) -> Result<()> {
-        if let Some(provider) = self.ctx.dns_provider {
-            order
-                .dns_provider(provider, &self.ctx.dns_provider_api_token)
-                .unwrap()
-                .validate_challenge(&self.account, ChallengeType::Dns01)
-                .unwrap()
-                .finalize(&self.account)
-                .unwrap()
-                .download_certificate(&self.account)
-                .unwrap();
-
-            return Ok(());
-        }
-
-        for challenge in order.challenges.values() {
-            challenge.get_instructions(&self.ctx.dns_instructions_lang);
-        }
-
-        Err(HttpSSLError::OrderPending)
-    }
-
-    fn handle_order_ready(&self, mut order: Order) -> Result<()> {
-        order
-            .finalize(&self.account)
-            .unwrap()
-            .download_certificate(&self.account)
+        let mut account = AccountBuilder::new(&ctx.email)
+            .dir_url("https://acme-staging-v02.api.letsencrypt.org/directory")
+            .build()
             .unwrap();
-        Ok(())
+
+        Self::init(&mut account, ctx, false)?;
+
+        let cert_key = account.get_cert_key(&ctx.domain).unwrap();
+        let mut cert = account.get_certificate(&ctx.domain).unwrap();
+
+        if ctx.auto_renew && cert.should_renew(ctx.renew_days)? {
+            println!("Renewing SSL certificate for domain: {}", ctx.domain);
+            Self::init(&mut account, ctx, true)?;
+            cert = account.get_certificate(&ctx.domain).unwrap();
+        }
+
+        Ok(Self { cert_key, cert })
     }
 
-    fn handler_order_processing(&self, order: Order) -> Result<()> {
-        order.download_certificate(&self.account).unwrap();
+    fn init(account: &mut Account, ctx: &HttpSSLContext, renew: bool) -> Result<()> {
+        println!("Creating SSL certificate for domain: {}", ctx.domain);
+        let mut order = match renew {
+            true => Order::renew(account, &ctx.domain)?
+                .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?,
+            false => Order::new(account, &ctx.domain)?
+                .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?,
+        };
+
+        let order = match order.validate_challenge(account) {
+            Ok(order) => order,
+            Err(_) => {
+                order.display_challenges(&ctx.dns_instructions_lang);
+                order.validation_with_retry(account, Duration::from_secs(3), 20)?
+            }
+        };
+
+        order.finalize(account)?;
+        order.download_certificate(account)?;
+
         Ok(())
     }
 }

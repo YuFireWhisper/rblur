@@ -32,7 +32,7 @@ impl FromStr for HttpMethod {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum HttpVersion {
     Invalid,
     Http1_1,
@@ -142,7 +142,7 @@ impl HttpStatus {
             510 => "Not Extended",
             511 => "Network Authentication Required",
 
-            _ => "Unknown Status Code"
+            _ => "Unknown Status Code",
         }
     }
 }
