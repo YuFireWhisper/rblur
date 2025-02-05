@@ -1,6 +1,6 @@
 http {
   server {
-    listen 0.0.0.0:8443;
+    listen 0.0.0.0:8080;
 
     location / {
       static_file /home/yuwhisper/projects/blur/index.html; 

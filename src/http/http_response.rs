@@ -28,6 +28,14 @@ impl HttpResponse {
         self.body.push_str("\r\n");
         self.body.push_str(body);
     }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut response = Vec::new();
+        response.extend_from_slice(self.status_line.as_bytes());
+        response.extend_from_slice(self.header.as_bytes());
+        response.extend_from_slice(self.body.as_bytes());
+        response
+    }
 }
 
 pub fn get_content_type(path: &str) -> &'static str {
