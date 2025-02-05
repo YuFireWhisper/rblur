@@ -18,16 +18,13 @@ use rustls::{
 };
 
 use crate::{
-    core::config::{
-        command::Command, config_context::ConfigContext, config_file_parser::parse_context_of,
-    },
+    core::config::{command::Command, config_context::ConfigContext},
     events::thread_pool::THREAD_POOL,
     http::http_ssl::HttpSSL,
     register_commands,
 };
 
 use super::{
-    get_context_u8,
     http_location::{HttpLocation, HttpLocationContext},
     http_manager::HttpContext,
     http_response::HttpResponse,
@@ -54,30 +51,15 @@ register_commands!(
 );
 
 pub fn handle_create_server(ctx: &mut ConfigContext) {
-    let prev_ctx = ctx.current_ctx.take();
-    let prev_block_type_id = ctx.current_block_type_id.take();
-
-    let mut server_ctx = HttpServerContext::new();
-    ctx.current_ctx = Some(get_context_u8(&mut server_ctx));
+    println!("Creating server");
+    let server_ctx = Arc::new(HttpServerContext::new());
+    let server_raw = Arc::into_raw(server_ctx.clone()) as *mut u8;
+    ctx.current_ctx = Some(AtomicPtr::new(server_raw));
     ctx.current_block_type_id = Some(TypeId::of::<HttpServerContext>());
-
-    parse_context_of(ctx).unwrap();
-
-    let listen_addr = server_ctx.listen().to_string();
-    let server_ctx = Arc::new(server_ctx);
-
-    ctx.current_ctx = prev_ctx;
-    ctx.current_block_type_id = prev_block_type_id;
-
-    if let Some(http_ctx_ptr) = &ctx.current_ctx {
-        let http_ptr = http_ctx_ptr.load(Ordering::SeqCst);
-        let http_ctx = unsafe { &mut *(http_ptr as *mut HttpContext) };
-        http_ctx.set_server(&listen_addr, server_ctx);
-    }
 }
 
 pub fn handle_set_listen(ctx: &mut ConfigContext) {
-    let listen = &ctx.current_cmd_args[1];
+    let listen = ctx.current_cmd_args.first().unwrap();
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
         let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
         if !srv_ptr.is_null() {
@@ -88,21 +70,14 @@ pub fn handle_set_listen(ctx: &mut ConfigContext) {
 }
 
 pub fn handle_set_server_name(ctx: &mut ConfigContext) {
-    let server_name = &ctx.current_cmd_args[1];
+    let server_name = ctx.current_cmd_args.first().unwrap();
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
         let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-        srv_ctx.add_server_name(server_name);
+        if !srv_ptr.is_null() {
+            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
+            srv_ctx.add_server_name(server_name);
+        }
     }
-}
-
-pub fn get_server_ctx(current_ctx: &Option<AtomicPtr<u8>>) -> Option<&mut HttpServerContext> {
-    if let Some(srv_ctx_ptr) = current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        return Some(unsafe { &mut *(srv_ptr as *mut HttpServerContext) });
-    }
-
-    None
 }
 
 #[derive(Default)]
@@ -110,6 +85,7 @@ pub struct HttpServerContext {
     listen: Mutex<String>,
     server_names: Mutex<Vec<String>>,
     http_version: Mutex<HttpVersion>,
+
     locations: Mutex<HashMap<String, Arc<HttpLocationContext>>>,
     ssl: Mutex<Option<HttpSSLContext>>,
 }
@@ -138,13 +114,6 @@ impl HttpServerContext {
     pub fn add_server_name(&self, name: &str) {
         if let Ok(mut names) = self.server_names.lock() {
             names.push(name.to_string());
-        }
-    }
-
-    pub fn set_location(&self, path: &str, ctx: *mut u8) {
-        if let Ok(mut locations) = self.locations.lock() {
-            let location_ctx = unsafe { &*(ctx as *const HttpLocationContext) };
-            locations.insert(path.to_string(), Arc::new(location_ctx.clone()));
         }
     }
 
@@ -178,6 +147,10 @@ impl HttpServerContext {
             *ssl_ctx = Some(ssl);
         }
     }
+
+    pub fn get_http_version(&self) -> HttpVersion {
+        self.http_version.lock().unwrap().clone()
+    }
 }
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -190,42 +163,76 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn new(ctx: &Arc<HttpServerContext>) -> Self {
-        let listen = ctx.listen();
+    pub fn new(server_config: &ConfigContext) -> Self {
+        let server_arc: Arc<HttpServerContext> = if let Some(ptr) = &server_config.current_ctx {
+            let srv_raw = ptr.load(Ordering::SeqCst);
+            unsafe { Arc::from_raw(srv_raw as *const HttpServerContext) }
+        } else {
+            panic!("Server block missing HttpServerContext");
+        };
+        let server_ctx = server_arc.clone();
+        std::mem::forget(server_arc);
+
+        let listen = server_ctx.listen();
         println!("Listening on: {}", listen);
 
-        let http_version = Arc::new(ctx.http_version.lock().unwrap().clone());
-        let locations = Arc::new(ctx.get_locations());
-        let ssl = {
-            let ssl_guard = ctx.ssl.lock().unwrap();
-            if ssl_guard.is_none() {
-                None
-            } else {
-                let ssl_ctx = ssl_guard.as_ref().unwrap();
-                let ssl = HttpSSL::new(ssl_ctx).unwrap();
-                let pem_key = ssl.cert_key.pri_key.private_key_to_pem_pkcs8().unwrap();
-                let pri_key =
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from_pem_slice(&pem_key).unwrap());
+        let mut locations_map: HashMap<String, Arc<HttpLocationContext>> = HashMap::new();
+        let mut ssl_config: Option<Arc<ServerConfig>> = None;
+        for child in &server_config.children {
+            println!("Server child: {:?}", child);
+            match child.block_name.trim() {
+                "location" => {
+                    let path = child
+                        .block_args
+                        .first()
+                        .expect("location block must have a path")
+                        .clone();
+                    if let Some(ptr) = &child.current_ctx {
+                        let loc_raw = ptr.load(Ordering::SeqCst);
+                        let loc_arc: Arc<HttpLocationContext> =
+                            unsafe { Arc::from_raw(loc_raw as *const HttpLocationContext) };
+                        locations_map.insert(path, loc_arc.clone());
+                        std::mem::forget(loc_arc);
+                    }
+                }
+                "ssl" => {
+                    if child.current_ctx.is_some() {
+                        if let Ok(http_ssl) = HttpSSL::from_config(child) {
+                            let pem_key = http_ssl.cert_key.pri_key.private_key_to_pem_pkcs8().unwrap();
+                            let pri_key = PrivateKeyDer::Pkcs8(
+                                PrivatePkcs8KeyDer::from_pem_slice(&pem_key).expect("Invalid key"),
+                            );
+                            let pem_cert = http_ssl.cert.cert.to_pem().unwrap();
+                            println!("Cert: {}", String::from_utf8_lossy(&pem_cert));
+                            let cert = CertificateDer::from_pem_slice(&pem_cert).unwrap();
 
-                let pem_cert = ssl.cert.cert.to_pem().unwrap();
-                let cert = CertificateDer::from_pem_slice(&pem_cert).unwrap();
-
-                let config = ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_single_cert(vec![cert], pri_key)
-                    .unwrap();
-
-                Some(Arc::new(config))
+                            ssl_config = Some(Arc::new(
+                                ServerConfig::builder()
+                                    .with_no_client_auth()
+                                    .with_single_cert(vec![cert], pri_key)
+                                    .unwrap(),
+                            ));
+                        } else {
+                            eprintln!("Failed to create SSL config");
+                        }
+                    }
+                }
+                _ => {}
             }
-        };
+        }
 
-        println!("SSL enabled: {}", ssl.is_some());
+        let locations: Vec<(String, Arc<HttpLocationContext>)> =
+            locations_map.into_iter().collect();
+        let listener = TcpListener::bind(&listen).unwrap();
+        let http_version = Arc::new(server_ctx.get_http_version());
+
+        println!("SSL enabled: {}", ssl_config.is_some());
 
         Self {
-            listener: TcpListener::bind(listen).unwrap(),
+            listener,
             http_version,
-            locations,
-            ssl,
+            locations: Arc::new(locations),
+            ssl: ssl_config,
         }
     }
 

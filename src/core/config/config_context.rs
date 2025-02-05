@@ -1,6 +1,9 @@
-use std::{any::TypeId, fs::File, io::BufReader, sync::atomic::AtomicPtr};
+use std::{any::TypeId, sync::atomic::AtomicPtr};
 
+#[derive(Debug)]
 pub struct ConfigContext {
+    pub block_name: String,
+    pub block_args: Vec<String>,
     pub current_cmd_name: String,
     pub current_cmd_args: Vec<String>,
     pub current_block_type_id: Option<TypeId>,
@@ -10,16 +13,15 @@ pub struct ConfigContext {
     pub spare3: Option<AtomicPtr<u8>>,
     pub spare4: Option<AtomicPtr<u8>>,
     pub spare5: Option<AtomicPtr<u8>>,
-    pub reader: BufReader<File>,
     pub parse_pos: u64,
+    pub children: Vec<ConfigContext>,
 }
 
 impl ConfigContext {
-    pub fn new(path: &str) -> std::io::Result<Self> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-
-        Ok(ConfigContext {
+    pub fn new_empty(block_name: String, args: Vec<String>) -> Self {
+        ConfigContext {
+            block_name,
+            block_args: args,
             current_cmd_name: String::new(),
             current_cmd_args: Vec::new(),
             current_block_type_id: None,
@@ -29,8 +31,8 @@ impl ConfigContext {
             spare3: None,
             spare4: None,
             spare5: None,
-            reader,
             parse_pos: 0,
-        })
+            children: Vec::new(),
+        }
     }
 }

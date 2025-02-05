@@ -1,19 +1,17 @@
 use std::{
     any::TypeId,
     collections::HashMap,
-    fs,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{atomic::{AtomicPtr, Ordering}, Arc, Mutex},
 };
 
 use crate::{
     core::config::{
-        command::Command, config_context::ConfigContext, config_file_parser::parse_context_of,
+        command::Command, config_context::ConfigContext,
     },
     register_commands,
 };
 
 use super::{
-    get_context_u8,
     http_response::{get_content_type, HttpResponse},
     http_server::HttpServerContext,
     http_type::HttpVersion,
@@ -33,41 +31,19 @@ register_commands!(
 );
 
 pub fn handle_create_location(ctx: &mut ConfigContext) {
-    let path = ctx.current_cmd_args[1].clone();
-    let prev_ctx = ctx.current_ctx.take();
-    let prev_block_type_id = ctx.current_block_type_id.take();
-
-    let location_ctx = Box::new(HttpLocationContext::new());
-    let location_ctx = Box::leak(location_ctx);
-
-    ctx.current_ctx = Some(get_context_u8(location_ctx));
+    let location_ctx = Arc::new(HttpLocationContext::new());
+    let location_raw = Arc::into_raw(location_ctx.clone()) as *mut u8;
+    ctx.current_ctx = Some(AtomicPtr::new(location_raw));
     ctx.current_block_type_id = Some(TypeId::of::<HttpLocationContext>());
-
-    parse_context_of(ctx).unwrap();
-
-    if let Some(srv_ctx_ptr) = &prev_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-
-        if let Some(loc_ctx_ptr) = &ctx.current_ctx.take() {
-            let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
-            srv_ctx.set_location(&path, loc_ptr);
-        }
-    }
-
-    ctx.current_ctx = prev_ctx;
-    ctx.current_block_type_id = prev_block_type_id;
 }
 
 pub fn handle_set_static_file(ctx: &mut ConfigContext) {
-    let file_path = ctx.current_cmd_args[1].clone();
-    println!("Static file path: {file_path}");
-
+    let file_path = ctx.current_cmd_args[0].clone();
+    println!("Static file path: {}", file_path);
     if let Some(loc_ctx_ptr) = &ctx.current_ctx {
         let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
-        let content = Arc::new(fs::read_to_string(&file_path).unwrap());
+        let content = Arc::new(std::fs::read_to_string(&file_path).unwrap());
         let content_type = get_content_type(&file_path).to_string();
-
         let handler = Box::new(move || {
             let mut resp = HttpResponse::new();
             resp.set_status_line(HttpVersion::Http1_1, 200);
@@ -75,11 +51,11 @@ pub fn handle_set_static_file(ctx: &mut ConfigContext) {
             resp.set_body(&content);
             resp
         });
-
         let loc_ctx = unsafe { &mut *(loc_ptr as *mut HttpLocationContext) };
         loc_ctx.set_handler(200, handler);
     }
 }
+
 
 type HandlerFunction = Box<dyn Fn() -> HttpResponse + Send + Sync + 'static>;
 type HandlersMap = HashMap<u32, HandlerFunction>;

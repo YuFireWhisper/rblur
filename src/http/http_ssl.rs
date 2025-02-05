@@ -1,6 +1,5 @@
 use std::{
     any::TypeId,
-    ptr,
     str::FromStr,
     sync::atomic::{AtomicPtr, Ordering},
     time::Duration,
@@ -16,8 +15,7 @@ use thiserror::Error;
 
 use crate::{
     core::config::{
-        command::Command, config_context::ConfigContext, config_file_parser::parse_context_of,
-        config_manager::bool_str_to_bool,
+        command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool,
     },
     http::http_server::HttpServerContext,
     register_commands,
@@ -84,54 +82,34 @@ register_commands!(
 );
 
 pub fn handle_create_ssl(ctx: &mut ConfigContext) {
-    let enable = bool_str_to_bool(ctx.current_cmd_args.get(1).unwrap()).unwrap();
-
+    println!("ConfigContext: {:#?}", ctx);
+    let enable = bool_str_to_bool(ctx.block_args.first().unwrap()).unwrap();
     if !enable {
         return;
     }
-
-    let srv_ctx = ctx.current_ctx.take();
-    let prev_block_type_id = ctx.current_block_type_id.take();
-
     let mut ssl_ctx = Box::new(HttpSSLContext::new());
     ssl_ctx.ssl = true;
-
-    ctx.current_ctx = Some(AtomicPtr::new(Box::into_raw(ssl_ctx) as *mut u8));
+    let ssl_raw = Box::into_raw(ssl_ctx) as *mut u8;
+    ctx.current_ctx = Some(AtomicPtr::new(ssl_raw));
     ctx.current_block_type_id = Some(TypeId::of::<HttpSSLContext>());
-
-    parse_context_of(ctx).expect("Error at handle_create_ssl");
-
-    if let Some(srv_ctx_ptr) = &srv_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-
-        if let Some(ssl_ctx_ptr) = ctx.current_ctx.take() {
-            let ssl_ptr = ssl_ctx_ptr.load(Ordering::SeqCst);
-            let ssl_ctx: HttpSSLContext = unsafe { ptr::read(ssl_ptr as *const HttpSSLContext) };
-            srv_ctx.set_ssl(ssl_ctx);
-        }
-    }
-
-    ctx.current_ctx = srv_ctx;
-    ctx.current_block_type_id = prev_block_type_id;
 }
 
 pub fn handle_set_ssl_email(ctx: &mut ConfigContext) {
-    let email = ctx.current_cmd_args.get(1).unwrap();
+    let email = ctx.current_cmd_args.first().unwrap();
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.email = email.to_string();
     }
 }
 
 pub fn handle_set_ssl_domain(ctx: &mut ConfigContext) {
-    let domain = ctx.current_cmd_args.get(1).unwrap();
+    let domain = ctx.current_cmd_args.first().unwrap();
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.domain = domain.to_string();
     }
 }
 
 pub fn handle_set_ssl_auto_renew(ctx: &mut ConfigContext) {
-    let enable = bool_str_to_bool(ctx.current_cmd_args.get(1).unwrap()).unwrap();
+    let enable = bool_str_to_bool(ctx.current_cmd_args.first().unwrap()).unwrap();
 
     if !enable {
         return;
@@ -143,15 +121,20 @@ pub fn handle_set_ssl_auto_renew(ctx: &mut ConfigContext) {
 }
 
 pub fn handle_set_ssl_renew_day(ctx: &mut ConfigContext) {
-    let days = ctx.current_cmd_args.get(1).unwrap().parse::<u32>().unwrap();
+    let days = ctx
+        .current_cmd_args
+        .first()
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.renew_days = days;
     }
 }
 
 pub fn handle_set_ssl_dns_provider(ctx: &mut ConfigContext) {
-    let provider = ctx.current_cmd_args.get(1).unwrap();
-    let api_token = ctx.current_cmd_args.get(2).unwrap();
+    let provider = ctx.current_cmd_args.first().unwrap();
+    let api_token = ctx.current_cmd_args.get(1).unwrap();
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.dns_provider = DnsProvider::from_str(provider).unwrap();
         ssl_ctx.dns_provider_api_token = api_token.to_string();
@@ -159,7 +142,7 @@ pub fn handle_set_ssl_dns_provider(ctx: &mut ConfigContext) {
 }
 
 pub fn handler_set_ssl_dns_instructions_lang(ctx: &mut ConfigContext) {
-    let lang = ctx.current_cmd_args.get(1).unwrap();
+    let lang = ctx.current_cmd_args.first().unwrap();
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.dns_instructions_lang = lang.to_string();
     }
@@ -228,10 +211,16 @@ impl HttpSSL {
             .build()
             .unwrap();
 
+        println!("Creating account for email: {}", ctx.email);
+
         Self::init(&mut account, ctx, false)?;
 
-        let cert_key = account.get_cert_key(&ctx.domain).unwrap();
-        let mut cert = account.get_certificate(&ctx.domain).unwrap();
+        let cert_key = account
+            .get_cert_key(&ctx.domain)
+            .expect("Failed to get certificate key");
+        let mut cert = account
+            .get_certificate(&ctx.domain)
+            .expect("Failed to get certificate");
 
         if ctx.auto_renew && cert.should_renew(ctx.renew_days)? {
             println!("Renewing SSL certificate for domain: {}", ctx.domain);
@@ -240,6 +229,16 @@ impl HttpSSL {
         }
 
         Ok(Self { cert_key, cert })
+    }
+
+    pub fn from_config(ctx: &ConfigContext) -> Result<Self> {
+        if let Some(ssl_ctx_ptr) = &ctx.current_ctx {
+            let ssl_raw = ssl_ctx_ptr.load(Ordering::SeqCst);
+            let ssl_ctx: &HttpSSLContext = unsafe { &*(ssl_raw as *const HttpSSLContext) };
+            Self::new(ssl_ctx)
+        } else {
+            Err(HttpSSLError::SSLNotEnabled)
+        }
     }
 
     fn init(account: &mut Account, ctx: &HttpSSLContext, renew: bool) -> Result<()> {

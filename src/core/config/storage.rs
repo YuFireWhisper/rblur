@@ -29,27 +29,39 @@ pub enum StorageError {
     AmbiguousPattern(String),
 }
 
-/// 儲存操作的結果類型，封裝 [`StorageError`]。
+/// 儲存操作的結果類型。
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-/// 定義儲存系統所需實現的 API，支援檔案與目錄的建立、讀取、寫入及刪除等操作。
+/// 儲存系統 API 定義。
 pub trait Storage: Send + Sync + fmt::Debug {
+    /// 建立指定目錄路徑（包含必要的父目錄）。
     fn create_dir_all(&self, key: &str) -> Result<()>;
+    /// 以純文字 key 讀取檔案內容。
+    /// 若 key 含萬用字元則會回傳錯誤，請改用 `read_files`。
     fn read_file(&self, key: &str) -> Result<Vec<u8>>;
+    /// 根據萬用字元模式讀取符合條件的檔案，回傳檔名與內容的對應表。
+    fn read_files(&self, pattern: &str) -> Result<HashMap<String, Vec<u8>>>;
+    /// 寫入檔案內容。
     fn write_file(&self, key: &str, value: &[u8]) -> Result<()>;
+    /// 刪除檔案或目錄（支援萬用字元模式）。
     fn remove(&self, key: &str) -> Result<()>;
+    /// 檢查指定 key 是否存在。
     fn exists(&self, key: &str) -> Result<bool>;
+    /// 判斷指定 key 是否為目錄。
     fn is_dir(&self, key: &str) -> Result<bool>;
-
-    /// 遍歷指定目錄下的所有檔案條目（僅包含直接位於該目錄下的檔案，不遞迴子目錄）
+    /// 遍歷指定目錄下的檔案（僅包含直接位於該目錄下的檔案）。
     fn traverse(&self, dir: &str) -> Result<HashMap<String, Vec<u8>>>;
+    /// 獲取指定路徑下所有目錄的名稱。
+    fn list_dirs(&self, dir: &str) -> Result<Vec<String>>;
+    /// 獲取指定路徑下所有檔案的名稱。
+    fn list_files(&self, dir: &str) -> Result<Vec<String>>;
 }
 
-/// 私有工具，提供 key 正規化、驗證與萬用字符匹配等輔助函式。
+/// 工具函式，提供 key 正規化、驗證與萬用字符匹配。
 struct KeyUtils;
 
 impl KeyUtils {
-    /// 正規化 key 字串為絕對路徑，並檢查不合法字元與格式。
+    /// 正規化 key 為絕對路徑，並檢查格式與不合法字元。
     fn normalize(key: &str) -> Result<PathBuf> {
         if key.is_empty() {
             return Err(StorageError::InvalidKey("Empty key".to_string()));
@@ -108,7 +120,7 @@ impl KeyUtils {
         path.parent().map(|p| p.to_path_buf())
     }
 
-    /// 驗證並轉換目錄 key，確保其格式正確，並以斜線結尾。
+    /// 驗證目錄 key，確保其格式正確並以斜線結尾。
     fn verify_directory_key(key: &str) -> Result<PathBuf> {
         let mut path = Self::normalize(key)?;
         if !path.to_string_lossy().ends_with('/') {
@@ -117,7 +129,7 @@ impl KeyUtils {
         Ok(path)
     }
 
-    /// 驗證並轉換檔案 key，確保其格式正確且不以斜線結尾。
+    /// 驗證檔案 key，確保其格式正確且不以斜線結尾。
     fn verify_file_key(key: &str) -> Result<PathBuf> {
         let path = Self::normalize(key)?;
         if key.ends_with('/') || path.to_string_lossy().ends_with('/') {
@@ -129,14 +141,13 @@ impl KeyUtils {
         Ok(path)
     }
 
-    /// 判斷字串中是否含有萬用字符 '*'。
+    /// 判斷字串中是否包含萬用字符 '*'
     fn contains_wildcard(s: &str) -> bool {
         s.contains('*')
     }
 
-    /// 使用萬用字符模式比對 text。'*' 匹配任意字元序列（可為空）。
+    /// 使用萬用字符模式比對 text，'*' 可匹配任意字元序列。
     fn wildcard_match(pattern: &str, text: &str) -> bool {
-        // 簡單兩指針實作（非遞迴版本）
         let (p_bytes, t_bytes) = (pattern.as_bytes(), text.as_bytes());
         let (mut p, mut t) = (0, 0);
         let (mut star, mut match_index) = (None, 0);
@@ -165,7 +176,7 @@ impl KeyUtils {
     }
 }
 
-/// 基於檔案的儲存實作，將資料存放於單一檔案中，並維護索引以快速查詢。
+/// 基於檔案的儲存實作。
 #[derive(Debug)]
 pub struct FileStorage {
     index: Arc<RwLock<StorageIndex>>,
@@ -173,13 +184,13 @@ pub struct FileStorage {
     file_path: PathBuf,
 }
 
-/// 檔案儲存的索引結構，用於儲存各個 entry 的 metadata。
+/// 儲存索引。
 #[derive(Debug)]
 struct StorageIndex {
     entries: HashMap<PathBuf, EntryMetadata>,
 }
 
-/// Entry 的元資料，包括在檔案中的偏移量、是否為目錄以及是否已刪除。
+/// Entry 的元資料。
 #[derive(Debug, Clone, Copy)]
 struct EntryMetadata {
     offset: u64,
@@ -188,7 +199,7 @@ struct EntryMetadata {
 }
 
 impl FileStorage {
-    /// 開啟或建立檔案儲存，並在 open 時進行壓縮（清除已刪除條目）。
+    /// 開啟或建立檔案儲存，並初始化根目錄與壓縮已刪除條目。
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file_path = path.as_ref().to_path_buf();
         let file = {
@@ -212,7 +223,6 @@ impl FileStorage {
             file_path,
         };
 
-        // 若索引為空則建立根目錄
         {
             let idx = storage
                 .index
@@ -224,13 +234,11 @@ impl FileStorage {
             }
         }
 
-        // 若存在已刪除條目則進行壓縮
         storage.compress()?;
 
         Ok(storage)
     }
 
-    /// 從檔案中讀取所有 entry，並建構索引。
     fn build_index(file: &fs::File) -> Result<StorageIndex> {
         let mut reader = io::BufReader::new(file);
         let mut entries = HashMap::new();
@@ -238,10 +246,7 @@ impl FileStorage {
         loop {
             let entry_offset = offset;
             let buffer = reader.fill_buf()?;
-            if buffer.is_empty() {
-                break;
-            }
-            if buffer.len() < 8 {
+            if buffer.is_empty() || buffer.len() < 8 {
                 break;
             }
             let header: [u8; 8] = buffer[..8].try_into().unwrap();
@@ -269,10 +274,7 @@ impl FileStorage {
             }
             offset += 4;
             let size = u32::from_le_bytes(size_buf);
-            let skipped = io::copy(&mut (&mut reader).take(size as u64), &mut io::sink())?;
-            if skipped != size as u64 {
-                break;
-            }
+            io::copy(&mut (&mut reader).take(size as u64), &mut io::sink())?;
             offset += size as u64;
             entries.insert(
                 path,
@@ -286,14 +288,12 @@ impl FileStorage {
         Ok(StorageIndex { entries })
     }
 
-    /// 解析 entry header，從前 8 個位元組中取得 key 長度及旗標資訊。
     fn parse_header(header: &[u8; 8]) -> (u32, u8) {
         let key_len = u32::from_le_bytes(header[0..4].try_into().unwrap());
         let flags = header[4];
         (key_len, flags)
     }
 
-    /// 將一筆 entry 寫入儲存檔案，並更新索引。
     fn write_entry(&self, key: &Path, value: &[u8], is_dir: bool) -> Result<()> {
         let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
         let key_str = key.to_string_lossy();
@@ -317,7 +317,6 @@ impl FileStorage {
         Ok(())
     }
 
-    /// 建立 entry header，內含 key 長度與旗標資訊。
     fn create_header(key_len: u32, is_dir: bool, is_deleted: bool) -> [u8; 8] {
         let mut header = [0u8; 8];
         header[0..4].copy_from_slice(&key_len.to_le_bytes());
@@ -325,7 +324,6 @@ impl FileStorage {
         header
     }
 
-    /// 讀取指定 offset 處的 entry（用於壓縮時複製條目）。
     fn read_entry_at(&self, offset: u64) -> Result<(PathBuf, bool, Vec<u8>)> {
         let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
         file.seek(SeekFrom::Start(offset))?;
@@ -344,9 +342,7 @@ impl FileStorage {
         Ok((key, is_dir, value))
     }
 
-    /// 壓縮 (Compaction)：清除已刪除的條目，重寫檔案。
     fn compress(&self) -> Result<()> {
-        // 檢查是否有已刪除條目
         let need_compress = {
             let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
             index.entries.values().any(|m| m.is_deleted)
@@ -354,17 +350,14 @@ impl FileStorage {
         if !need_compress {
             return Ok(());
         }
-        // 建立臨時檔案
         let tmp_path = self.file_path.with_extension("tmp");
         let mut new_file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&tmp_path)?;
-
         let mut new_index = HashMap::new();
         {
-            // 從原索引複製所有未刪除條目，注意需複製 metadata（因為 EntryMetadata 實作 Copy）
             let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
             let mut entries: Vec<(&PathBuf, EntryMetadata)> = index
                 .entries
@@ -372,10 +365,8 @@ impl FileStorage {
                 .filter(|(_, meta)| !meta.is_deleted)
                 .map(|(k, meta)| (k, *meta))
                 .collect();
-            // 依 offset 排序（保留寫入順序）
             entries.sort_by_key(|(_, meta)| meta.offset);
             for (key, _meta) in entries {
-                // 讀取原始條目內容
                 let (entry_key, is_dir, value) = self.read_entry_at(
                     index
                         .entries
@@ -404,11 +395,9 @@ impl FileStorage {
             }
             new_file.flush()?;
         }
-        // 取代原始檔案：關閉舊檔案後以新檔案覆蓋
         {
             drop(self.file.write().map_err(|_| StorageError::LockPoisoned)?);
             fs::rename(&tmp_path, &self.file_path)?;
-            // 重新開啟檔案（以附加模式）
             let new_f = {
                 #[cfg(unix)]
                 {
@@ -423,7 +412,6 @@ impl FileStorage {
             let mut file_lock = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
             *file_lock = new_f;
         }
-        // 更新索引
         {
             let mut index = self.index.write().map_err(|_| StorageError::LockPoisoned)?;
             index.entries = new_index;
@@ -431,7 +419,7 @@ impl FileStorage {
         Ok(())
     }
 
-    /// 輔助：根據給定（已正規化且不含萬用字符）的 key 讀取檔案內容。
+    /// 讀取純文字 key 對應的檔案內容。
     fn read_file_literal(&self, path: &Path) -> Result<Vec<u8>> {
         let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
         if let Some(metadata) = index.entries.get(path) {
@@ -441,7 +429,6 @@ impl FileStorage {
             if metadata.is_dir {
                 return Err(StorageError::IsDir(path.to_string_lossy().into_owned()));
             }
-            // 注意：此處不要在 index 持有期間再借用 self.file，避免重複借用
             drop(index);
             let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
             file.seek(SeekFrom::Start(
@@ -489,36 +476,47 @@ impl Storage for FileStorage {
 
     fn read_file(&self, key: &str) -> Result<Vec<u8>> {
         if KeyUtils::contains_wildcard(key) {
-            // 萬用字符模式：在 index 中比對所有符合的檔案（不包含目錄）
-            let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
-            let matches: Vec<PathBuf> = index
-                .entries
-                .iter()
-                .filter(|(entry, meta)| {
-                    !meta.is_deleted
-                        && !meta.is_dir
-                        && KeyUtils::wildcard_match(key, &entry.to_string_lossy())
-                })
-                .map(|(entry, _)| entry.clone())
-                .collect();
-            drop(index);
-            match matches.len() {
-                0 => Err(StorageError::NotFound(key.to_string())),
-                1 => self.read_file_literal(&matches[0]),
-                _ => Err(StorageError::AmbiguousPattern(format!(
-                    "Wildcard pattern '{}' matches multiple files",
-                    key
-                ))),
-            }
+            Err(StorageError::InvalidKey(
+                "Wildcard pattern not allowed in read_file; use read_files instead".to_string(),
+            ))
         } else {
             let path = KeyUtils::verify_file_key(key)?;
             self.read_file_literal(&path)
         }
     }
 
+    fn read_files(&self, pattern: &str) -> Result<HashMap<String, Vec<u8>>> {
+        let mut result = HashMap::new();
+        if !KeyUtils::contains_wildcard(pattern) {
+            let path = KeyUtils::verify_file_key(pattern)?;
+            let content = self.read_file_literal(&path)?;
+            result.insert(path.to_string_lossy().into_owned(), content);
+            return Ok(result);
+        }
+        let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+        let targets: Vec<PathBuf> = index
+            .entries
+            .iter()
+            .filter(|(entry, meta)| {
+                !meta.is_deleted
+                    && !meta.is_dir
+                    && KeyUtils::wildcard_match(pattern, &entry.to_string_lossy())
+            })
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        drop(index);
+        if targets.is_empty() {
+            return Err(StorageError::NotFound(pattern.to_string()));
+        }
+        for target in targets {
+            let content = self.read_file_literal(&target)?;
+            result.insert(target.to_string_lossy().into_owned(), content);
+        }
+        Ok(result)
+    }
+
     fn write_file(&self, key: &str, value: &[u8]) -> Result<()> {
         if KeyUtils::contains_wildcard(key) {
-            // 萬用字符模式：對所有符合的檔案進行覆寫
             let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
             let targets: Vec<PathBuf> = index
                 .entries
@@ -555,7 +553,6 @@ impl Storage for FileStorage {
 
     fn remove(&self, key: &str) -> Result<()> {
         if KeyUtils::contains_wildcard(key) {
-            // 萬用字符模式：對所有符合的條目（檔案或目錄）進行標記刪除
             let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
             let targets: Vec<PathBuf> = index
                 .entries
@@ -626,7 +623,6 @@ impl Storage for FileStorage {
     fn traverse(&self, dir: &str) -> Result<HashMap<String, Vec<u8>>> {
         let dir_path = KeyUtils::verify_directory_key(dir)?;
         let mut result = HashMap::new();
-        // 先收集符合直接位於該目錄下的檔案
         let matching_files: Vec<PathBuf> = {
             let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
             index
@@ -635,7 +631,7 @@ impl Storage for FileStorage {
                 .filter(|(entry, meta)| {
                     !meta.is_deleted
                         && !meta.is_dir
-                        && KeyUtils::parent(entry).map_or_else(|| false, |p| p == dir_path)
+                        && (KeyUtils::parent(entry).as_ref() == Some(&dir_path))
                 })
                 .map(|(entry, _)| entry.clone())
                 .collect()
@@ -646,9 +642,57 @@ impl Storage for FileStorage {
         }
         Ok(result)
     }
+
+    fn list_dirs(&self, dir: &str) -> Result<Vec<String>> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+
+        let dirs: Vec<String> = index
+            .entries
+            .iter()
+            .filter(|(entry, meta)| {
+                !meta.is_deleted
+                    && meta.is_dir
+                    && KeyUtils::parent(entry).as_ref() == Some(&dir_path)
+            })
+            .map(|(entry, _)| {
+                entry
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        Ok(dirs)
+    }
+
+    fn list_files(&self, dir: &str) -> Result<Vec<String>> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+
+        let files: Vec<String> = index
+            .entries
+            .iter()
+            .filter(|(entry, meta)| {
+                !meta.is_deleted
+                    && !meta.is_dir
+                    && KeyUtils::parent(entry).as_ref() == Some(&dir_path)
+            })
+            .map(|(entry, _)| {
+                entry
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        Ok(files)
+    }
 }
 
-/// 基於記憶體的儲存實作，資料與目錄結構皆保存在記憶體中。
+/// 基於記憶體的儲存實作。
 #[derive(Debug)]
 pub struct MemStorage {
     data: Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>,
@@ -662,7 +706,7 @@ impl Default for MemStorage {
 }
 
 impl MemStorage {
-    /// 建立一個新的記憶體儲存實例，並初始化根目錄 `/`。
+    /// 建立新的記憶體儲存實例並初始化根目錄 `/`。
     pub fn new() -> Self {
         let mut dirs = HashMap::new();
         dirs.insert(PathBuf::from("/"), ());
@@ -697,26 +741,9 @@ impl Storage for MemStorage {
 
     fn read_file(&self, key: &str) -> Result<Vec<u8>> {
         if KeyUtils::contains_wildcard(key) {
-            let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
-            let matches: Vec<PathBuf> = data
-                .iter()
-                .filter(|(k, _)| KeyUtils::wildcard_match(key, &k.to_string_lossy()))
-                .map(|(k, _)| k.clone())
-                .collect();
-            drop(data);
-            match matches.len() {
-                0 => Err(StorageError::NotFound(key.to_string())),
-                1 => {
-                    let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
-                    data.get(&matches[0]).cloned().ok_or_else(|| {
-                        StorageError::NotFound(matches[0].to_string_lossy().into_owned())
-                    })
-                }
-                _ => Err(StorageError::AmbiguousPattern(format!(
-                    "Wildcard pattern '{}' matches multiple files",
-                    key
-                ))),
-            }
+            Err(StorageError::InvalidKey(
+                "Wildcard pattern not allowed in read_file; use read_files instead".to_string(),
+            ))
         } else {
             let path = KeyUtils::verify_file_key(key)?;
             let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
@@ -724,6 +751,37 @@ impl Storage for MemStorage {
                 .cloned()
                 .ok_or_else(|| StorageError::NotFound(key.to_string()))
         }
+    }
+
+    fn read_files(&self, pattern: &str) -> Result<HashMap<String, Vec<u8>>> {
+        let mut result = HashMap::new();
+        if !KeyUtils::contains_wildcard(pattern) {
+            let path = KeyUtils::verify_file_key(pattern)?;
+            let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
+            let content = data
+                .get(&path)
+                .cloned()
+                .ok_or_else(|| StorageError::NotFound(pattern.to_string()))?;
+            result.insert(path.to_string_lossy().into_owned(), content);
+            return Ok(result);
+        }
+        let data_keys: Vec<PathBuf> = {
+            let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
+            data.keys()
+                .filter(|k| KeyUtils::wildcard_match(pattern, &k.to_string_lossy()))
+                .cloned()
+                .collect()
+        };
+        if data_keys.is_empty() {
+            return Err(StorageError::NotFound(pattern.to_string()));
+        }
+        let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
+        for key in data_keys {
+            if let Some(content) = data.get(&key) {
+                result.insert(key.to_string_lossy().into_owned(), content.clone());
+            }
+        }
+        Ok(result)
     }
 
     fn write_file(&self, key: &str, value: &[u8]) -> Result<()> {
@@ -863,7 +921,7 @@ impl Storage for MemStorage {
         let matching_files: Vec<PathBuf> = {
             let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
             data.keys()
-                .filter(|k| KeyUtils::parent(k).map_or_else(|| false, |p| p == dir_path))
+                .filter(|k| KeyUtils::parent(k).as_ref() == Some(&dir_path))
                 .cloned()
                 .collect()
         };
@@ -872,5 +930,43 @@ impl Storage for MemStorage {
             result.insert(file_path.to_string_lossy().into_owned(), content);
         }
         Ok(result)
+    }
+
+    fn list_dirs(&self, dir: &str) -> Result<Vec<String>> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        let dirs = self.dirs.read().map_err(|_| StorageError::LockPoisoned)?;
+
+        let subdirs: Vec<String> = dirs
+            .keys()
+            .filter(|entry| KeyUtils::parent(entry).as_ref() == Some(&dir_path))
+            .map(|entry| {
+                entry
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        Ok(subdirs)
+    }
+
+    fn list_files(&self, dir: &str) -> Result<Vec<String>> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
+
+        let files: Vec<String> = data
+            .keys()
+            .filter(|entry| KeyUtils::parent(entry).as_ref() == Some(&dir_path))
+            .map(|entry| {
+                entry
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        Ok(files)
     }
 }

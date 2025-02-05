@@ -1,39 +1,38 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use blur::{
-    core::config::{
-        config_context::ConfigContext, config_file_parser::parse_context_of,
-        config_manager::ConfigManager,
-    },
-    http::http_manager::{HttpContext, HttpManager},
-};
+use blur::core::config::config_loader;
+use blur::core::config::storage::FileStorage;
+use blur::{core::config::config_manager::ConfigManager, http::http_manager::HttpManager};
 
 fn main() {
     ConfigManager::init();
 
-    let mut ctx = ConfigContext::new("/home/yuwhisper/projects/blur/config/config_template")
-        .expect("Failed to create config context");
+    let config_path = "/home/yuwhisper/projects/blur/config/config_template";
+    let storage_path = "/home/yuwhisper/projects/blur/config/file_storage";
 
-    parse_context_of(&mut ctx).expect("Failed to parse context");
-    println!("Configuration parsing complete");
+    let storage;
+    if !Path::new(storage_path).exists() {
+        storage = FileStorage::open(storage_path).expect("Failed to open file storage");
+        config_loader::load_config_file(config_path, &storage).unwrap();
+    } else {
+        storage = FileStorage::open(storage_path).expect("Failed to open file storage");
+    }
 
-    if let Some(http_ctx_ptr) = ctx.spare2.take() {
-        let http_ptr = http_ctx_ptr.load(Ordering::SeqCst);
-        let http_ctx = unsafe { Arc::new(*Box::from_raw(http_ptr as *mut HttpContext)) };
+    let root_ctx = config_loader::process_existing_config(&storage).unwrap();
 
-        if let Ok(servers_count) = http_ctx.servers.lock() {
-            println!("\nNumber of servers: {}", servers_count.len());
-        }
+    let http_block = root_ctx
+        .children
+        .iter()
+        .find(|child| child.block_name.trim() == "http")
+        .expect("http block not found");
 
-        let mut manager = HttpManager::new(http_ctx);
-        manager.start();
+    let mut http_manager = HttpManager::new(http_block);
+    http_manager.start();
+    http_manager.join();
 
-        manager.join();
-
-        loop {
-            thread::sleep(Duration::from_secs(1));
-        }
+    loop {
+        thread::sleep(Duration::from_secs(1));
     }
 }
