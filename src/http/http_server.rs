@@ -1,3 +1,4 @@
+use racme::storage::{FileStorage, Storage};
 use rustls::pki_types::pem::PemObject;
 use std::{
     any::TypeId,
@@ -18,11 +19,11 @@ use rustls::{
 
 use crate::{
     core::{
-        config::{command::Command, config_context::ConfigContext},
+        config::{command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool, storage::get_default_storage_path},
         processor::{HttpProcessor, Processor},
     },
     events::thread_pool::THREAD_POOL,
-    http::{http_manager::HttpContext, http_ssl::HttpSSL},
+    http::{http_manager::HttpContext, http_request::HttpRequest, http_response::HttpResponse, http_ssl::HttpSSL},
     register_commands,
 };
 
@@ -43,7 +44,12 @@ register_commands!(
         "server_name",
         vec![TypeId::of::<HttpServerContext>()],
         handle_set_server_name
-    )
+    ),
+    Command::new(
+        "web_config",
+        vec![TypeId::of::<HttpServerContext>()],
+        handle_web_config
+    ),
 );
 
 /// 建立 Server 區塊時建立 HttpServerContext，並順便初始化 processor
@@ -79,6 +85,42 @@ pub fn handle_set_server_name(ctx: &mut ConfigContext) {
     }
 }
 
+pub fn handle_web_config(ctx: &mut ConfigContext) {
+    let flag = ctx.current_cmd_args[0].clone();
+    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
+        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
+        if !srv_ptr.is_null() {
+            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
+            let web_config = bool_str_to_bool(&flag).unwrap_or(false);
+            srv_ctx.web_config = Mutex::new(web_config);
+        }
+    }
+}
+
+pub fn web_config(request: &HttpRequest) -> HttpResponse {
+    let storage_path = get_default_storage_path();
+    let storage = FileStorage::open(&storage_path).unwrap();
+    let params = request.query_params();
+
+    // 如果為空，則回傳404
+    if params.is_empty() {
+        return HttpProcessor::create_404_response(request.version());
+    }
+
+    for (path, value) in params {
+        storage.write_file(&path, value.as_bytes()).unwrap();
+        let check = storage.read_file(&path).unwrap();
+        println!("{}: {:?}", path, String::from_utf8(check));
+    }
+
+    println!("Web config updated");
+
+    let mut resp = HttpResponse::new();
+    resp.set_status_line(request.version().to_owned(), 200);
+    resp.set_header("Content-Type", "text/plain");
+    resp
+}
+
 fn atomic_ptr_new<T>(ptr: *mut T) -> std::sync::atomic::AtomicPtr<u8> {
     std::sync::atomic::AtomicPtr::new(ptr as *mut u8)
 }
@@ -90,6 +132,7 @@ pub struct HttpServerContext {
     server_names: Mutex<Vec<String>>,
     http_version: Mutex<HttpVersion>,
     processor: Mutex<HttpProcessor>,
+    web_config: Mutex<bool>,
 }
 
 impl HttpServerContext {
@@ -99,6 +142,7 @@ impl HttpServerContext {
             server_names: Mutex::new(Vec::new()),
             http_version: Mutex::new(HttpVersion::default()),
             processor: Mutex::new(HttpProcessor::new()),
+            web_config: Mutex::new(false),
         }
     }
 
@@ -202,6 +246,12 @@ impl HttpServer {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        if *server_ctx.web_config.lock().unwrap() {
+            if let Ok(mut proc_lock) = server_ctx.processor.lock() {
+                proc_lock.add_handler("/config".to_string(), 200, Box::new(web_config));
             }
         }
 

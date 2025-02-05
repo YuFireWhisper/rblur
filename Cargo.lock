@@ -136,9 +136,11 @@ dependencies = [
  "once_cell",
  "openssl",
  "racme",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "thiserror",
+ "url",
 ]
 
 [[package]]

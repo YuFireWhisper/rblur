@@ -14,7 +14,7 @@ pub trait Processor {
     fn process(&self, request: Vec<u8>) -> ProcessorResult<ProcessorResponse>;
 }
 
-type HttpHandler = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>;
+pub type HttpHandler = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>;
 
 #[derive(Default)]
 pub struct HttpProcessor {
@@ -53,7 +53,9 @@ impl Processor for HttpProcessor {
             req
         };
 
-        let handler = self.handlers.get(&(req.path().to_string(), 200));
+        // 獲取Path，如果路逕中有參數，則去掉參數部分
+        let path = req.path().split('?').next().unwrap().to_string();
+        let handler = self.handlers.get(&(path, 200));
 
         let response = match handler {
             Some(handler) => handler(&req),

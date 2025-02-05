@@ -183,6 +183,17 @@ impl HttpRequest {
     pub fn is_complete(&self) -> bool {
         matches!(self.parse_state, ParseState::Complete)
     }
+
+    pub fn query_params(&self) -> HashMap<String, String> {
+        let mut params = HashMap::new();
+        if let Some(query_start) = self.path.find('?') {
+            let query_string = &self.path[query_start + 1..];
+            for (key, value) in url::form_urlencoded::parse(query_string.as_bytes()) {
+                params.insert(key.into_owned(), value.into_owned());
+            }
+        }
+        params
+    }
 }
 
 #[cfg(test)]

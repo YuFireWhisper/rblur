@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt, fs,
+    env, fmt, fs,
     io::{self, BufRead, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, RwLock},
@@ -454,6 +454,31 @@ impl FileStorage {
             Err(StorageError::NotFound(path.to_string_lossy().into_owned()))
         }
     }
+
+    fn update_entry_in_place(&self, meta: &EntryMetadata, new_value: &[u8]) -> Result<bool> {
+        // 取得檔案的寫入鎖
+        let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
+        // 移動到該條目的起始位置
+        file.seek(SeekFrom::Start(meta.offset))?;
+        // 讀取 header 以獲得 key 的長度
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header)?;
+        let key_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+        // 略過 key 的內容
+        file.seek(SeekFrom::Current(key_len as i64))?;
+        // 讀取 value 的大小
+        let mut size_buf = [0u8; 4];
+        file.read_exact(&mut size_buf)?;
+        let old_size = u32::from_le_bytes(size_buf) as usize;
+        // 如果新值長度不匹配，則無法就地更新
+        if new_value.len() != old_size {
+            return Ok(false);
+        }
+        // 就地覆寫新內容
+        file.write_all(new_value)?;
+        file.flush()?; // 確保資料寫入磁碟
+        Ok(true)
+    }
 }
 
 impl Storage for FileStorage {
@@ -517,6 +542,7 @@ impl Storage for FileStorage {
 
     fn write_file(&self, key: &str, value: &[u8]) -> Result<()> {
         if KeyUtils::contains_wildcard(key) {
+            // 若 key 中包含萬用字元，則針對符合條件的所有檔案進行更新（不嘗試就地更新）
             let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
             let targets: Vec<PathBuf> = index
                 .entries
@@ -533,11 +559,13 @@ impl Storage for FileStorage {
                 return Err(StorageError::NotFound(key.to_string()));
             }
             for target in targets {
+                // 此處不檢查原有 value 長度，直接標記舊條目刪除並追加新的條目
                 self.write_entry(&target, value, false)?;
             }
             Ok(())
         } else {
             let path = KeyUtils::verify_file_key(key)?;
+            // 檢查父目錄是否存在
             if let Some(parent) = KeyUtils::parent(&path) {
                 let parent_str = parent.to_string_lossy();
                 if !self.exists(&parent_str)? {
@@ -547,6 +575,42 @@ impl Storage for FileStorage {
                     return Err(StorageError::NotDirectory(parent_str.into_owned()));
                 }
             }
+            // 檢查此 key 是否已存在
+            let maybe_meta = {
+                let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+                index.entries.get(&path).copied()
+            };
+            if let Some(meta) = maybe_meta {
+                // 如果原條目已存在且不是目錄，嘗試就地更新
+                if !meta.is_dir {
+                    match self.update_entry_in_place(&meta, value)? {
+                        true => {
+                            // 就地更新成功，直接返回
+                            return Ok(());
+                        }
+                        false => {
+                            // 無法就地更新：標記舊條目為刪除，然後新增新的條目
+                            {
+                                let mut index =
+                                    self.index.write().map_err(|_| StorageError::LockPoisoned)?;
+                                if let Some(metadata) = index.entries.get_mut(&path) {
+                                    metadata.is_deleted = true;
+                                }
+                            }
+                            // 將刪除狀態同步寫入檔案（更新 header 的 flags 位元）
+                            {
+                                let mut file =
+                                    self.file.write().map_err(|_| StorageError::LockPoisoned)?;
+                                file.seek(SeekFrom::Start(meta.offset + 4))?;
+                                // 2 表示檔案且已刪除
+                                file.write_all(&[2])?;
+                                file.flush()?;
+                            }
+                        }
+                    }
+                }
+            }
+            // 以 append 模式新增新的條目（同時更新 index）
             self.write_entry(&path, value, false)
         }
     }
@@ -968,5 +1032,18 @@ impl Storage for MemStorage {
             .collect();
 
         Ok(files)
+    }
+}
+
+pub fn get_default_storage_path() -> PathBuf {
+    let app_name = env!("CARGO_PKG_NAME");
+
+    #[cfg(target_os = "linux")]
+    {
+        let base_dir = env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/lib"));
+
+        base_dir.join(".local/share").join(app_name)
     }
 }

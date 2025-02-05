@@ -1,21 +1,24 @@
+use reqwest::blocking::Client;
+
 use crate::http::http_server::HttpServerContext;
 use std::{
     any::TypeId,
     collections::HashMap,
-    sync::{atomic::{AtomicPtr, Ordering}, Arc, Mutex},
+    sync::{
+        atomic::{AtomicPtr, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use crate::{
-    core::config::{
-        command::Command, config_context::ConfigContext,
-    },
+    core::config::{command::Command, config_context::ConfigContext},
     register_commands,
 };
 
 use super::{
+    http_request::HttpRequest,
     http_response::{get_content_type, HttpResponse},
     http_type::HttpVersion,
-    http_request::HttpRequest,
 };
 
 register_commands!(
@@ -28,7 +31,12 @@ register_commands!(
         "static_file",
         vec![TypeId::of::<HttpLocationContext>()],
         handle_set_static_file
-    )
+    ),
+    Command::new(
+        "port_forward",
+        vec![TypeId::of::<HttpServerContext>()],
+        handle_port_forward,
+    ),
 );
 
 /// 在 location 區塊開始時建立一個 HttpLocationContext，供子命令登錄 handler 使用
@@ -59,13 +67,48 @@ pub fn handle_set_static_file(ctx: &mut ConfigContext) {
     }
 }
 
+pub fn handle_port_forward(ctx: &mut ConfigContext) {
+    let forward_addr = ctx.current_cmd_args[0].clone();
+    println!("Port forward address: {}", forward_addr);
+
+    if let Some(loc_ctx_ptr) = &ctx.current_ctx {
+        let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
+        let handler = Box::new(move |req: &HttpRequest| {
+            let client = Client::new();
+            let url = format!("{}{}", forward_addr, req.path());
+            println!("Forwarding request to: {}", url);
+
+            let result = client.get(&url).send();
+            match result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body = response
+                        .text()
+                        .unwrap_or_else(|_| "Error reading forwarded response".into());
+                    let mut resp = HttpResponse::new();
+                    resp.set_status_line(HttpVersion::Http1_1, status);
+                    resp.set_body(&body);
+                    resp
+                }
+                Err(_err) => {
+                    let mut resp = HttpResponse::new();
+                    resp.set_status_line(HttpVersion::Http1_1, 502);
+                    resp.set_body("Bad Gateway");
+                    resp
+                }
+            }
+        });
+        let loc_ctx = unsafe { &mut *(loc_ptr as *mut HttpLocationContext) };
+        loc_ctx.set_handler(200, handler);
+    }
+}
+
 /// 此區塊僅用於配置階段保存各路由的處理器，待 Server 建立時轉登 Processor
 /// 注意：此結構在運行時不再直接被使用，只在配置中暫存 handler 資訊
 pub type HttpHandlerFunction = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>;
 
 #[derive(Default, Clone)]
 pub struct HttpLocationContext {
-    // 鍵為狀態碼（例如200），值為處理器函數
     pub handlers: Arc<Mutex<HashMap<u32, HttpHandlerFunction>>>,
 }
 

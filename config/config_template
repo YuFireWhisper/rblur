@@ -1,6 +1,6 @@
 http {
   server {
-    listen 0.0.0.0:8080;
+    listen 0.0.0.0:8443;
 
     location / {
       static_file /home/yuwhisper/projects/blur/index.html; 
@@ -11,5 +11,8 @@ http {
       ssl_domain xiuzhe.xyz;
       ssl_dns_provider cloudflare O_11mdO0LqJ_ISHo8iIVr5pY1dGXOk9V1fEm65i6;
     }
+
+    web_config on
   }
+  
 }
