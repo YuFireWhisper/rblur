@@ -3,9 +3,9 @@ use std::{
     any::TypeId,
     collections::HashMap,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -28,7 +28,6 @@ use super::{
     http_location::{HttpLocation, HttpLocationContext},
     http_manager::HttpContext,
     http_response::HttpResponse,
-    http_ssl::HttpSSLContext,
     http_type::HttpVersion,
 };
 
@@ -54,7 +53,7 @@ pub fn handle_create_server(ctx: &mut ConfigContext) {
     println!("Creating server");
     let server_ctx = Arc::new(HttpServerContext::new());
     let server_raw = Arc::into_raw(server_ctx.clone()) as *mut u8;
-    ctx.current_ctx = Some(AtomicPtr::new(server_raw));
+    ctx.current_ctx = Some(atomic_ptr_new(server_raw));
     ctx.current_block_type_id = Some(TypeId::of::<HttpServerContext>());
 }
 
@@ -80,14 +79,16 @@ pub fn handle_set_server_name(ctx: &mut ConfigContext) {
     }
 }
 
+fn atomic_ptr_new<T>(ptr: *mut T) -> std::sync::atomic::AtomicPtr<u8> {
+    std::sync::atomic::AtomicPtr::new(ptr as *mut u8)
+}
+
 #[derive(Default)]
 pub struct HttpServerContext {
     listen: Mutex<String>,
     server_names: Mutex<Vec<String>>,
     http_version: Mutex<HttpVersion>,
-
     locations: Mutex<HashMap<String, Arc<HttpLocationContext>>>,
-    ssl: Mutex<Option<HttpSSLContext>>,
 }
 
 impl HttpServerContext {
@@ -97,7 +98,6 @@ impl HttpServerContext {
             server_names: Mutex::new(Vec::new()),
             locations: Mutex::new(HashMap::new()),
             http_version: Mutex::new(HttpVersion::default()),
-            ssl: Mutex::new(None),
         }
     }
 
@@ -142,24 +142,17 @@ impl HttpServerContext {
         }
     }
 
-    pub fn set_ssl(&self, ssl: HttpSSLContext) {
-        if let Ok(mut ssl_ctx) = self.ssl.lock() {
-            *ssl_ctx = Some(ssl);
-        }
-    }
-
     pub fn get_http_version(&self) -> HttpVersion {
         self.http_version.lock().unwrap().clone()
     }
 }
-
-static RUNNING: AtomicBool = AtomicBool::new(true);
 
 pub struct HttpServer {
     listener: TcpListener,
     http_version: Arc<HttpVersion>,
     locations: Arc<Vec<(String, Arc<HttpLocationContext>)>>,
     ssl: Option<Arc<ServerConfig>>,
+    running: Arc<AtomicBool>,
 }
 
 impl HttpServer {
@@ -178,8 +171,8 @@ impl HttpServer {
 
         let mut locations_map: HashMap<String, Arc<HttpLocationContext>> = HashMap::new();
         let mut ssl_config: Option<Arc<ServerConfig>> = None;
+
         for child in &server_config.children {
-            println!("Server child: {:?}", child);
             match child.block_name.trim() {
                 "location" => {
                     let path = child
@@ -198,12 +191,15 @@ impl HttpServer {
                 "ssl" => {
                     if child.current_ctx.is_some() {
                         if let Ok(http_ssl) = HttpSSL::from_config(child) {
-                            let pem_key = http_ssl.cert_key.pri_key.private_key_to_pem_pkcs8().unwrap();
+                            let pem_key = http_ssl
+                                .cert_key
+                                .pri_key
+                                .private_key_to_pem_pkcs8()
+                                .unwrap();
                             let pri_key = PrivateKeyDer::Pkcs8(
                                 PrivatePkcs8KeyDer::from_pem_slice(&pem_key).expect("Invalid key"),
                             );
                             let pem_cert = http_ssl.cert.cert.to_pem().unwrap();
-                            println!("Cert: {}", String::from_utf8_lossy(&pem_cert));
                             let cert = CertificateDer::from_pem_slice(&pem_cert).unwrap();
 
                             ssl_config = Some(Arc::new(
@@ -233,77 +229,100 @@ impl HttpServer {
             http_version,
             locations: Arc::new(locations),
             ssl: ssl_config,
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
     pub fn start(self) -> thread::JoinHandle<()> {
         println!("Server started");
-        thread::spawn(move || {
-            self.listener.set_nonblocking(true).unwrap();
+        let running_flag = self.running.clone();
+        let listener = self.listener;
+        let locations = self.locations.clone();
+        let http_version = self.http_version.clone();
+        let ssl_config = self.ssl.clone();
 
-            if self.locations.is_empty() {
+        thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("Failed to set non-blocking");
+
+            if locations.is_empty() {
                 eprintln!("No locations configured for server");
                 return;
             }
 
-            while RUNNING.load(Ordering::SeqCst) {
-                match self.listener.incoming().next() {
-                    Some(Ok(mut stream)) => {
-                        let from = stream.peer_addr().unwrap().to_string();
-                        println!("Traffic from: {from}");
-
-                        let locations = self.locations.clone();
-                        let http_version = self.http_version.clone();
-                        let ssl_config = self.ssl.clone();
-
-                        if let Ok(pool) = THREAD_POOL.lock() {
-                            if let Err(e) = pool.spawn(move || {
-                                if let Some(ssl_config) = ssl_config {
-                                    let mut conn = match ServerConnection::new(ssl_config) {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            eprintln!("Failed to create TLS connection: {}", e);
-                                            return;
-                                        }
-                                    };
-
-                                    let mut tls_stream =
-                                        rustls::Stream::new(&mut conn, &mut stream);
-
-                                    match tls_stream.flush() {
-                                        Ok(_) => {
-                                            if let Err(e) = handle_connection(
-                                                &mut tls_stream,
-                                                &locations,
-                                                &http_version,
-                                            ) {
-                                                eprintln!("Error handling TLS connection: {}", e);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!("TLS handshake error: {}", e);
-                                        }
-                                    }
-                                } else if let Err(e) =
-                                    handle_connection(&mut stream, &locations, &http_version)
-                                {
-                                    eprintln!("Error handling connection: {}", e);
-                                }
-                            }) {
-                                eprintln!("Thread pool error: {}", e);
-                            }
-                        }
+            while running_flag.load(Ordering::SeqCst) {
+                match listener.incoming().next() {
+                    Some(Ok(stream)) => {
+                        println!("Connection from: {}", stream.peer_addr().unwrap());
+                        process_connection(
+                            stream,
+                            locations.clone(),
+                            http_version.clone(),
+                            ssl_config.clone(),
+                        );
                     }
                     Some(Err(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                         continue;
                     }
-                    Some(Err(e)) => eprintln!("Connection failed: {}", e),
+                    Some(Err(e)) => {
+                        eprintln!("Connection failed: {}", e);
+                    }
                     None => break,
                 }
             }
+            println!("Server stopped accepting connections.");
         })
     }
+
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        println!("Server stop requested");
+    }
+}
+
+fn process_connection(
+    stream: TcpStream,
+    locations: Arc<Vec<(String, Arc<HttpLocationContext>)>>,
+    http_version: Arc<HttpVersion>,
+    ssl_config: Option<Arc<ServerConfig>>,
+) {
+    if let Ok(pool) = THREAD_POOL.lock() {
+        let _ = pool.spawn(move || {
+            if let Err(e) = if let Some(ssl_cfg) = ssl_config {
+                process_tls_connection(stream, ssl_cfg, locations, http_version)
+            } else {
+                process_plain_connection(stream, locations, http_version)
+            } {
+                eprintln!("Error handling connection: {}", e);
+            }
+        });
+    } else {
+        eprintln!("Thread pool error");
+    }
+}
+
+fn process_plain_connection(
+    mut stream: TcpStream,
+    locations: Arc<Vec<(String, Arc<HttpLocationContext>)>>,
+    http_version: Arc<HttpVersion>,
+) -> std::io::Result<()> {
+    handle_connection(&mut stream, &locations, &http_version)
+}
+
+fn process_tls_connection(
+    mut stream: TcpStream,
+    ssl_cfg: Arc<ServerConfig>,
+    locations: Arc<Vec<(String, Arc<HttpLocationContext>)>>,
+    http_version: Arc<HttpVersion>,
+) -> std::io::Result<()> {
+    let mut conn = ServerConnection::new(ssl_cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
+
+    tls_stream.flush()?;
+    handle_connection(&mut tls_stream, &locations, &http_version)
 }
 
 fn handle_connection<S: Read + Write>(
@@ -333,7 +352,6 @@ fn handle_connection<S: Read + Write>(
 
     stream.write_all(response_string.as_bytes())?;
     stream.flush()?;
-
     Ok(())
 }
 

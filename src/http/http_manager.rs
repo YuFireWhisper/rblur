@@ -53,11 +53,8 @@ pub struct HttpManager {
 impl HttpManager {
     pub fn new(http_config: &ConfigContext) -> Self {
         let mut servers = Vec::new();
-        println!("HTTP Config children count: {}", http_config.children.len());
-        println!("HTTP Config children: {:?}", http_config.children);
         for server_ctx in &http_config.children {
             if server_ctx.block_name == "server" {
-                println!("Server context: {:?}", server_ctx);
                 if let Some(ptr) = server_ctx.current_ctx.as_ref() {
                     let srv_raw = ptr.load(std::sync::atomic::Ordering::SeqCst);
                     let srv_arc: Arc<HttpServerContext> =

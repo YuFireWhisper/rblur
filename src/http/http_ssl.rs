@@ -82,7 +82,6 @@ register_commands!(
 );
 
 pub fn handle_create_ssl(ctx: &mut ConfigContext) {
-    println!("ConfigContext: {:#?}", ctx);
     let enable = bool_str_to_bool(ctx.block_args.first().unwrap()).unwrap();
     if !enable {
         return;
