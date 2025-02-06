@@ -6,6 +6,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use serde::Serialize;
+use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 /// 儲存操作可能發生的錯誤類型。
@@ -27,10 +29,22 @@ pub enum StorageError {
     CorruptedFile,
     #[error("Wildcard pattern is ambiguous: {0}")]
     AmbiguousPattern(String),
+    #[error("Serialization error: {0}")]
+    Serialization(String),
 }
 
 /// 儲存操作的結果類型。
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+#[derive(Debug, Serialize)]
+pub struct DirNode {
+    name: String,
+    is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<DirNode>,
+}
 
 /// 儲存系統 API 定義。
 pub trait Storage: Send + Sync + fmt::Debug {
@@ -55,6 +69,14 @@ pub trait Storage: Send + Sync + fmt::Debug {
     fn list_dirs(&self, dir: &str) -> Result<Vec<String>>;
     /// 獲取指定路徑下所有檔案的名稱。
     fn list_files(&self, dir: &str) -> Result<Vec<String>>;
+    /// 遞歸遍歷目錄結構（不含文件內容）
+    fn traverse_tree(&self, dir: &str) -> Result<DirNode>;
+    /// 將目錄結構轉換為 JSON（不含內容）
+    fn traverse_tree_json(&self, dir: &str) -> Result<JsonValue>;
+    /// 遞歸遍歷目錄結構（包含文件內容）
+    fn traverse_tree_with_content(&self, dir: &str) -> Result<DirNode>;
+    /// 將目錄結構轉換為 JSON（包含內容）
+    fn traverse_tree_with_content_json(&self, dir: &str) -> Result<JsonValue>;
 }
 
 /// 工具函式，提供 key 正規化、驗證與萬用字符匹配。
@@ -479,6 +501,63 @@ impl FileStorage {
         file.flush()?; // 確保資料寫入磁碟
         Ok(true)
     }
+
+    fn _traverse_tree(&self, dir_path: &Path, include_content: bool) -> Result<DirNode> {
+        let dir_str = dir_path
+            .to_str()
+            .ok_or_else(|| StorageError::InvalidKey("Invalid directory path".to_string()))?;
+
+        let subdirs = self.list_dirs(dir_str)?;
+        let files = self.list_files(dir_str)?;
+
+        let mut children = Vec::new();
+
+        // 處理子目錄
+        for subdir in subdirs {
+            let subdir_path = dir_path.join(&subdir);
+            let subdir_node = self._traverse_tree(&subdir_path, include_content)?;
+            children.push(DirNode {
+                name: subdir,
+                is_dir: true,
+                content: None,
+                children: subdir_node.children,
+            });
+        }
+
+        // 處理文件
+        for file in files {
+            let file_path = dir_path.join(&file);
+            let content = if include_content {
+                Some(self.read_file(&file_path.to_string_lossy())?)
+            } else {
+                None
+            };
+            children.push(DirNode {
+                name: file,
+                is_dir: false,
+                content,
+                children: Vec::new(),
+            });
+        }
+
+        // 處理根目錄名稱
+        let name = if dir_path == Path::new("/") {
+            "/".to_string()
+        } else {
+            dir_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                .to_string_lossy()
+                .to_string()
+        };
+
+        Ok(DirNode {
+            name,
+            is_dir: true,
+            content: None,
+            children,
+        })
+    }
 }
 
 impl Storage for FileStorage {
@@ -754,6 +833,26 @@ impl Storage for FileStorage {
 
         Ok(files)
     }
+
+    fn traverse_tree(&self, dir: &str) -> Result<DirNode> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        self._traverse_tree(&dir_path, false)
+    }
+
+    fn traverse_tree_json(&self, dir: &str) -> Result<JsonValue> {
+        let tree = self.traverse_tree(dir)?;
+        serde_json::to_value(tree).map_err(|e| StorageError::Serialization(e.to_string()))
+    }
+
+    fn traverse_tree_with_content(&self, dir: &str) -> Result<DirNode> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        self._traverse_tree(&dir_path, true)
+    }
+
+    fn traverse_tree_with_content_json(&self, dir: &str) -> Result<JsonValue> {
+        let tree = self.traverse_tree_with_content(dir)?;
+        serde_json::to_value(tree).map_err(|e| StorageError::Serialization(e.to_string()))
+    }
 }
 
 /// 基於記憶體的儲存實作。
@@ -778,6 +877,62 @@ impl MemStorage {
             data: Arc::new(RwLock::new(HashMap::new())),
             dirs: Arc::new(RwLock::new(dirs)),
         }
+    }
+
+    fn _traverse_tree(&self, dir_path: &Path, include_content: bool) -> Result<DirNode> {
+        let dir_str = dir_path
+            .to_str()
+            .ok_or_else(|| StorageError::InvalidKey("Invalid directory path".to_string()))?;
+
+        let subdirs = self.list_dirs(dir_str)?;
+        let files = self.list_files(dir_str)?;
+
+        let mut children = Vec::new();
+
+        // 處理子目錄
+        for subdir in subdirs {
+            let subdir_path = dir_path.join(&subdir);
+            let subdir_node = self._traverse_tree(&subdir_path, include_content)?;
+            children.push(DirNode {
+                name: subdir,
+                is_dir: true,
+                content: None,
+                children: subdir_node.children,
+            });
+        }
+
+        // 處理文件
+        for file in files {
+            let content = if include_content {
+                Some(self.read_file(&dir_path.join(&file).to_string_lossy())?)
+            } else {
+                None
+            };
+            children.push(DirNode {
+                name: file,
+                is_dir: false,
+                content,
+                children: Vec::new(),
+            });
+        }
+
+        // 處理根目錄名稱
+        let name = if dir_path == Path::new("/") {
+            "/".to_string()
+        } else {
+            dir_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                .to_string_lossy()
+                .to_string()
+        };
+
+        Ok(DirNode {
+            name,
+            is_dir: true,
+            content: None,
+            children,
+        })
     }
 }
 
@@ -1032,6 +1187,26 @@ impl Storage for MemStorage {
             .collect();
 
         Ok(files)
+    }
+
+    fn traverse_tree(&self, dir: &str) -> Result<DirNode> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        self._traverse_tree(&dir_path, false)
+    }
+
+    fn traverse_tree_json(&self, dir: &str) -> Result<JsonValue> {
+        let tree = self.traverse_tree(dir)?;
+        serde_json::to_value(tree).map_err(|e| StorageError::Serialization(e.to_string()))
+    }
+
+    fn traverse_tree_with_content(&self, dir: &str) -> Result<DirNode> {
+        let dir_path = KeyUtils::verify_directory_key(dir)?;
+        self._traverse_tree(&dir_path, true)
+    }
+
+    fn traverse_tree_with_content_json(&self, dir: &str) -> Result<JsonValue> {
+        let tree = self.traverse_tree_with_content(dir)?;
+        serde_json::to_value(tree).map_err(|e| StorageError::Serialization(e.to_string()))
     }
 }
 

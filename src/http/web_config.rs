@@ -147,6 +147,62 @@ impl WebConfig {
         HttpProcessor::create_404_response(request.version())
     }
 
+    /// 獲取目錄結構（不含文件內容）
+    ///
+    /// 請求方法: GET
+    /// 請求路徑: /traverse_tree
+    ///
+    /// 回傳狀態碼: 200(成功)
+    /// 回傳Body格式: 目錄結構(JSON)
+    pub fn handle_get_traverse_tree(&self, request: &HttpRequest) -> HttpResponse {
+        let params = request.query_params();
+
+        if let Some(paths) = params.get(WEB_CONFIG_GET_PATH_PARAM) {
+            let mut resp = HttpResponse::new();
+            let mut body = String::new();
+            for path in paths {
+                if let Ok(tree) = self.storage.traverse_tree_json(path) {
+                    body.push_str(&format!("{}\n", tree));
+                }
+            }
+
+            resp.set_status_line(request.version().to_owned(), StatusCode::OK);
+            resp.set_header("Content-Type", "application/json");
+            resp.set_body(&body);
+            return resp;
+        }
+
+        HttpProcessor::create_404_response(request.version())
+    }
+
+    /// 獲取目錄結構（含文件內容）
+    ///
+    /// 請求方法: GET
+    /// 請求路徑: /traverse_tree_with_content
+    ///
+    /// 回傳狀態碼: 200(成功)
+    /// 回傳Body格式: 目錄結構(JSON)
+    pub fn handle_get_traverse_tree_with_content(&self, request: &HttpRequest) -> HttpResponse {
+        let params = request.query_params();
+
+        if let Some(paths) = params.get(WEB_CONFIG_GET_PATH_PARAM) {
+            let mut resp = HttpResponse::new();
+            let mut body = String::new();
+            for path in paths {
+                if let Ok(tree) = self.storage.traverse_tree_with_content_json(path) {
+                    body.push_str(&format!("{}\n", tree));
+                }
+            }
+
+            resp.set_status_line(request.version().to_owned(), StatusCode::OK);
+            resp.set_header("Content-Type", "application/json");
+            resp.set_body(&body);
+            return resp;
+        }
+
+        HttpProcessor::create_404_response(request.version())
+    }
+
     /// 獲取指定目錄下的所有檔案名稱
     ///
     /// 請求方法: get
@@ -307,6 +363,26 @@ pub fn add_all_web_config_handlers(
         Box::new({
             let web_config = Arc::clone(&web_config);
             move |req| web_config.handle_post_file(req)
+        }),
+    );
+
+    proc_lock.add_handler(
+        format!("{}/traverse_tree", WEB_CONFIG_BASE_PATH),
+        StatusCode::OK,
+        &Method::GET,
+        Box::new({
+            let web_config = Arc::clone(&web_config);
+            move |req| web_config.handle_get_traverse_tree(req)
+        }),
+    );
+
+    proc_lock.add_handler(
+        format!("{}/traverse_tree_with_content", WEB_CONFIG_BASE_PATH),
+        StatusCode::OK,
+        &Method::GET,
+        Box::new({
+            let web_config = Arc::clone(&web_config);
+            move |req| web_config.handle_get_traverse_tree_with_content(req)
         }),
     );
 }
