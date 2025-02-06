@@ -1,4 +1,4 @@
-use racme::storage::{FileStorage, Storage};
+use http::{Method, StatusCode, Version};
 use rustls::pki_types::pem::PemObject;
 use std::{
     any::TypeId,
@@ -19,15 +19,18 @@ use rustls::{
 
 use crate::{
     core::{
-        config::{command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool, storage::get_default_storage_path},
+        config::{
+            command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool,
+            storage::get_default_storage_path,
+        },
         processor::{HttpProcessor, Processor},
     },
     events::thread_pool::THREAD_POOL,
-    http::{http_manager::HttpContext, http_request::HttpRequest, http_response::HttpResponse, http_ssl::HttpSSL},
+    http::{http_manager::HttpContext, http_ssl::HttpSSL, web_config},
     register_commands,
 };
 
-use super::{http_location::HttpLocationContext, http_type::HttpVersion};
+use super::{http_location::HttpLocationContext, web_config::WebConfig};
 
 register_commands!(
     Command::new(
@@ -87,38 +90,23 @@ pub fn handle_set_server_name(ctx: &mut ConfigContext) {
 
 pub fn handle_web_config(ctx: &mut ConfigContext) {
     let flag = ctx.current_cmd_args[0].clone();
+
+    if !bool_str_to_bool(&flag).expect("Invalid web_config value") {
+        return;
+    }
+
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
         let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
         if !srv_ptr.is_null() {
             let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            let web_config = bool_str_to_bool(&flag).unwrap_or(false);
-            srv_ctx.web_config = Mutex::new(web_config);
+            let storage_path = get_default_storage_path();
+            let web_config = WebConfig::new(&storage_path);
+
+            if let Ok(mut web_config_lock) = srv_ctx.web_config.lock() {
+                *web_config_lock = Some(Arc::new(web_config));
+            }
         }
     }
-}
-
-pub fn web_config(request: &HttpRequest) -> HttpResponse {
-    let storage_path = get_default_storage_path();
-    let storage = FileStorage::open(&storage_path).unwrap();
-    let params = request.query_params();
-
-    // 如果為空，則回傳404
-    if params.is_empty() {
-        return HttpProcessor::create_404_response(request.version());
-    }
-
-    for (path, value) in params {
-        storage.write_file(&path, value.as_bytes()).unwrap();
-        let check = storage.read_file(&path).unwrap();
-        println!("{}: {:?}", path, String::from_utf8(check));
-    }
-
-    println!("Web config updated");
-
-    let mut resp = HttpResponse::new();
-    resp.set_status_line(request.version().to_owned(), 200);
-    resp.set_header("Content-Type", "text/plain");
-    resp
 }
 
 fn atomic_ptr_new<T>(ptr: *mut T) -> std::sync::atomic::AtomicPtr<u8> {
@@ -130,9 +118,9 @@ fn atomic_ptr_new<T>(ptr: *mut T) -> std::sync::atomic::AtomicPtr<u8> {
 pub struct HttpServerContext {
     listen: Mutex<String>,
     server_names: Mutex<Vec<String>>,
-    http_version: Mutex<HttpVersion>,
+    http_version: Mutex<Version>,
     processor: Mutex<HttpProcessor>,
-    web_config: Mutex<bool>,
+    web_config: Mutex<Option<Arc<WebConfig>>>,
 }
 
 impl HttpServerContext {
@@ -140,9 +128,9 @@ impl HttpServerContext {
         Self {
             listen: Mutex::new("127.0.0.1:8080".to_string()),
             server_names: Mutex::new(Vec::new()),
-            http_version: Mutex::new(HttpVersion::default()),
+            http_version: Mutex::new(Version::default()),
             processor: Mutex::new(HttpProcessor::new()),
-            web_config: Mutex::new(false),
+            web_config: Mutex::new(None),
         }
     }
 
@@ -162,15 +150,15 @@ impl HttpServerContext {
         }
     }
 
-    pub fn get_http_version(&self) -> HttpVersion {
-        self.http_version.lock().unwrap().clone()
+    pub fn get_http_version(&self) -> Version {
+        *self.http_version.lock().unwrap()
     }
 }
 
 /// 代表最終運行的 HTTP 伺服器，持有 Processor 處理請求
 pub struct HttpServer {
     listener: TcpListener,
-    http_version: Arc<HttpVersion>,
+    http_version: Arc<Version>,
     processor: Arc<HttpProcessor>,
     ssl: Option<Arc<ServerConfig>>,
     running: Arc<AtomicBool>,
@@ -214,7 +202,12 @@ impl HttpServer {
                         let handlers = loc_arc.take_handlers();
                         for (code, handler) in handlers {
                             if let Ok(mut proc_lock) = server_ctx.processor.lock() {
-                                proc_lock.add_handler(path.clone(), code, handler);
+                                proc_lock.add_handler(
+                                    path.clone(),
+                                    StatusCode::from_u16(code).unwrap(),
+                                    &Method::OPTIONS,
+                                    handler,
+                                );
                             }
                         }
                         std::mem::forget(loc_arc);
@@ -249,9 +242,10 @@ impl HttpServer {
             }
         }
 
-        if *server_ctx.web_config.lock().unwrap() {
-            if let Ok(mut proc_lock) = server_ctx.processor.lock() {
-                proc_lock.add_handler("/config".to_string(), 200, Box::new(web_config));
+        if let Some(web_config) = server_ctx.web_config.lock().unwrap().as_ref() {
+            let web_config = Arc::clone(web_config);
+            if let Ok(proc_lock) = server_ctx.processor.lock() {
+                web_config::add_all_web_config_handlers(web_config, proc_lock);
             }
         }
 
@@ -326,7 +320,7 @@ impl HttpServer {
 fn process_connection(
     stream: TcpStream,
     processor: Arc<HttpProcessor>,
-    http_version: Arc<HttpVersion>,
+    http_version: Arc<Version>,
     ssl_config: Option<Arc<ServerConfig>>,
 ) {
     if let Ok(pool) = THREAD_POOL.lock() {
@@ -347,7 +341,7 @@ fn process_connection(
 fn process_plain_connection(
     mut stream: TcpStream,
     processor: &HttpProcessor,
-    http_version: &HttpVersion,
+    http_version: &Version,
 ) -> std::io::Result<()> {
     handle_connection(&mut stream, processor, http_version)
 }
@@ -356,7 +350,7 @@ fn process_tls_connection(
     mut stream: TcpStream,
     ssl_cfg: Arc<ServerConfig>,
     processor: &HttpProcessor,
-    http_version: &HttpVersion,
+    http_version: &Version,
 ) -> std::io::Result<()> {
     let mut conn = ServerConnection::new(ssl_cfg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -370,7 +364,7 @@ fn process_tls_connection(
 fn handle_connection<S: Read + Write>(
     stream: &mut S,
     processor: &HttpProcessor,
-    http_version: &HttpVersion,
+    http_version: &Version,
 ) -> std::io::Result<()> {
     let mut buffer = [0; 1024];
     let n = stream.read(&mut buffer)?;

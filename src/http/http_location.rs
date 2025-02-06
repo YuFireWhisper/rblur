@@ -1,3 +1,4 @@
+use http::{StatusCode, Version};
 use reqwest::blocking::Client;
 
 use crate::http::http_server::HttpServerContext;
@@ -18,7 +19,6 @@ use crate::{
 use super::{
     http_request::HttpRequest,
     http_response::{get_content_type, HttpResponse},
-    http_type::HttpVersion,
 };
 
 register_commands!(
@@ -57,7 +57,7 @@ pub fn handle_set_static_file(ctx: &mut ConfigContext) {
         // 修改 handler 的簽名，符合 Processor 的要求：接受 &HttpRequest 參數
         let handler = Box::new(move |_req: &HttpRequest| {
             let mut resp = HttpResponse::new();
-            resp.set_status_line(HttpVersion::Http1_1, 200);
+            resp.set_status_line(Version::HTTP_11, StatusCode::OK);
             resp.set_header("Content-Type", &content_type);
             resp.set_body(&content);
             resp
@@ -81,18 +81,18 @@ pub fn handle_port_forward(ctx: &mut ConfigContext) {
             let result = client.get(&url).send();
             match result {
                 Ok(response) => {
-                    let status = response.status().as_u16();
+                    let status = StatusCode::from_u16(response.status().as_u16()).expect("Invalid status code");
                     let body = response
                         .text()
                         .unwrap_or_else(|_| "Error reading forwarded response".into());
                     let mut resp = HttpResponse::new();
-                    resp.set_status_line(HttpVersion::Http1_1, status);
+                    resp.set_status_line(Version::HTTP_11, status);
                     resp.set_body(&body);
                     resp
                 }
                 Err(_err) => {
                     let mut resp = HttpResponse::new();
-                    resp.set_status_line(HttpVersion::Http1_1, 502);
+                    resp.set_status_line(Version::HTTP_11, StatusCode::BAD_GATEWAY);
                     resp.set_body("Bad Gateway");
                     resp
                 }
@@ -109,7 +109,7 @@ pub type HttpHandlerFunction = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send +
 
 #[derive(Default, Clone)]
 pub struct HttpLocationContext {
-    pub handlers: Arc<Mutex<HashMap<u32, HttpHandlerFunction>>>,
+    pub handlers: Arc<Mutex<HashMap<u16, HttpHandlerFunction>>>,
 }
 
 impl HttpLocationContext {
@@ -117,13 +117,13 @@ impl HttpLocationContext {
         Self::default()
     }
 
-    pub fn set_handler(&self, code: u32, handler: HttpHandlerFunction) {
+    pub fn set_handler(&self, code: u16, handler: HttpHandlerFunction) {
         if let Ok(mut handlers) = self.handlers.lock() {
             handlers.insert(code, handler);
         }
     }
 
-    pub fn take_handlers(&self) -> HashMap<u32, HttpHandlerFunction> {
+    pub fn take_handlers(&self) -> HashMap<u16, HttpHandlerFunction> {
         let mut map = HashMap::new();
         if let Ok(mut handlers) = self.handlers.lock() {
             std::mem::swap(&mut *handlers, &mut map);

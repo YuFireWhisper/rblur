@@ -1,4 +1,6 @@
-use super::http_type::{HttpStatus, HttpVersion};
+use http::{StatusCode, Version};
+
+use super::http_request::http_version_to_string;
 
 #[derive(Default, PartialEq)]
 pub struct HttpResponse {
@@ -12,21 +14,27 @@ impl HttpResponse {
         Self::default()
     }
 
-    pub fn set_status_line(&mut self, version: HttpVersion, status_code: u16) {
-        let status_message = HttpStatus::status_message(status_code);
-        self.status_line = format!("{version} {status_code} {status_message}");
+    pub fn set_status_line(&mut self, version: Version, status_code: StatusCode) -> &mut Self {
+        let message = status_code.canonical_reason().unwrap();
+        self.status_line = format!("{} {} {}", http_version_to_string(&version), status_code, message);
+
+        self
     }
 
-    pub fn set_header(&mut self, key: &str, value: &str) {
+    pub fn set_header(&mut self, key: &str, value: &str) -> &mut Self {
         self.header.push_str(key);
         self.header.push_str(": ");
         self.header.push_str(value);
         self.header.push_str("\r\n");
+
+        self
     }
 
-    pub fn set_body(&mut self, body: &str) {
+    pub fn set_body(&mut self, body: &str) -> &mut Self {
         self.body.push_str("\r\n");
         self.body.push_str(body);
+
+        self
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
@@ -63,7 +71,7 @@ mod tests {
     #[test]
     fn test_set_status_line() {
         let mut response = HttpResponse::new();
-        response.set_status_line(HttpVersion::Http1_1, 200);
+        response.set_status_line(Version::HTTP_11, StatusCode::OK);
 
         assert_eq!(response.status_line, "HTTP/1.1 200 OK".to_string());
     }

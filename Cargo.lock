@@ -133,12 +133,14 @@ name = "blur"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "http",
  "once_cell",
  "openssl",
  "racme",
  "reqwest",
  "rustls",
  "rustls-pemfile",
+ "serde_json",
  "thiserror",
  "url",
 ]

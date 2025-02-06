@@ -11,6 +11,7 @@ fn main() {
 
     let config_path = "/home/yuwhisper/projects/blur/config/config_template";
     let storage_path = get_default_storage_path();
+    println!("Storage path: {:?}", storage_path);
     let storage_path = storage_path.to_str().unwrap();
 
     let storage;
