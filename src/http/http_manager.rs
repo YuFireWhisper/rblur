@@ -1,24 +1,36 @@
 use std::{
-    any::TypeId,
     collections::HashMap,
     sync::{atomic::AtomicPtr, Arc, Mutex},
     thread,
 };
 
+use serde_json::Value;
+
 use crate::{
-    core::config::{command::Command, config_context::ConfigContext},
+    core::config::{command::CommandBuilder, config_context::ConfigContext},
     register_commands,
 };
 
 use super::http_server::{HttpServer, HttpServerContext};
 
-register_commands!(Command::new("http", vec![], handle_create_http),);
+register_commands!(CommandBuilder::new("http")
+    .is_block()
+    .is_unique()
+    .allowed_parents(vec!["root".to_string()])
+    .display_name("en", "HTTP")
+    .display_name("zh-tw", "HTTP")
+    .desc("en", "HTTP protocol configuration.")
+    .desc("zh-tw", "HTTP 協定配置。")
+    .build(handle_create_http));
 
-pub fn handle_create_http(ctx: &mut ConfigContext) {
+pub fn handle_create_http(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    _config: &Value,
+) {
     let http_ctx = Arc::new(HttpContext::new());
     let http_raw = Arc::into_raw(http_ctx.clone()) as *mut u8;
     ctx.current_ctx = Some(AtomicPtr::new(http_raw));
-    ctx.current_block_type_id = Some(TypeId::of::<HttpContext>());
+    ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpContext>());
 }
 
 #[derive(Default)]

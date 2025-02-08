@@ -1,5 +1,4 @@
 use std::{
-    any::TypeId,
     str::FromStr,
     sync::atomic::{AtomicPtr, Ordering},
     time::Duration,
@@ -11,13 +10,15 @@ use racme::{
     key_pair::KeyPair,
     order::{DnsProvider, Order, OrderError},
 };
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
     core::config::{
-        command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool,
+        command::{CommandBuilder, ParameterBuilder},
+        config_context::ConfigContext,
+        config_manager::{bool_str_to_bool, get_config_parame},
     },
-    http::http_server::HttpServerContext,
     register_commands,
 };
 
@@ -44,45 +45,138 @@ impl From<OrderError> for HttpSSLError {
 type Result<T> = std::result::Result<T, HttpSSLError>;
 
 register_commands!(
-    Command::new(
-        "ssl",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_create_ssl
-    ),
-    Command::new(
-        "ssl_email",
-        vec![TypeId::of::<HttpSSLContext>()],
-        handle_set_ssl_email
-    ),
-    Command::new(
-        "ssl_auto_renew",
-        vec![TypeId::of::<HttpSSLContext>()],
-        handle_set_ssl_auto_renew
-    ),
-    Command::new(
-        "ssl_renew_day",
-        vec![TypeId::of::<HttpSSLContext>()],
-        handle_set_ssl_renew_day
-    ),
-    Command::new(
-        "ssl_domain",
-        vec![TypeId::of::<HttpSSLContext>()],
-        handle_set_ssl_domain
-    ),
-    Command::new(
-        "ssl_dns_provider",
-        vec![TypeId::of::<HttpSSLContext>()],
-        handle_set_ssl_dns_provider
-    ),
-    Command::new(
-        "ssl_dns_instructions_lang",
-        vec![TypeId::of::<HttpSSLContext>()],
-        handler_set_ssl_dns_instructions_lang
-    )
+    CommandBuilder::new("ssl")
+        .is_block()
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "SSL")
+        .display_name("zh-tw", "SSL")
+        .desc("en", "Configures SSL for the server.")
+        .desc("zh-tw", "配置伺服器的 SSL。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Enable SSL")
+            .display_name("zh-tw", "啟用 SSL")
+            .type_name("bool")
+            .is_required(true)
+            .default("false")
+            .desc("en", "Set to true to enable SSL.")
+            .desc("zh-tw", "設置為 true 以啟用 SSL。")
+            .build()])
+        .build(handle_create_ssl),
+    CommandBuilder::new("ssl_email")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL Email")
+        .display_name("zh-tw", "SSL 電子郵件")
+        .desc("en", "Specifies the email for SSL certificate management.")
+        .desc("zh-tw", "指定用於 SSL 證書管理的電子郵件地址。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Email")
+            .display_name("zh-tw", "電子郵件")
+            .type_name("String")
+            .is_required(true)
+            .default("example@example.com")
+            .desc("en", "The email address for SSL.")
+            .desc("zh-tw", "用於 SSL 的電子郵件地址。")
+            .build()])
+        .build(handle_set_ssl_email),
+    CommandBuilder::new("ssl_auto_renew")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL Auto Renew")
+        .display_name("zh-tw", "SSL 自動更新")
+        .desc("en", "Enables automatic SSL certificate renewal.")
+        .desc("zh-tw", "啟用自動 SSL 證書更新。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Enable Auto Renew")
+            .display_name("zh-tw", "啟用自動更新")
+            .type_name("bool")
+            .is_required(true)
+            .default("false")
+            .desc("en", "Set to true to enable auto renewal.")
+            .desc("zh-tw", "設置為 true 以啟用自動更新。")
+            .build()])
+        .build(handle_set_ssl_auto_renew),
+    CommandBuilder::new("ssl_renew_day")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL Renew Day")
+        .display_name("zh-tw", "SSL 更新天數")
+        .desc("en", "Specifies the number of days before renewal.")
+        .desc("zh-tw", "指定更新前的天數。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Days")
+            .display_name("zh-tw", "天數")
+            .type_name("u32")
+            .is_required(true)
+            .default("30")
+            .desc("en", "Number of days before renewal.")
+            .desc("zh-tw", "更新前的天數。")
+            .build()])
+        .build(handle_set_ssl_renew_day),
+    CommandBuilder::new("ssl_domain")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL Domain")
+        .display_name("zh-tw", "SSL 域名")
+        .desc("en", "Specifies the domain for SSL.")
+        .desc("zh-tw", "指定 SSL 的域名。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Domain")
+            .display_name("zh-tw", "域名")
+            .type_name("String")
+            .is_required(true)
+            .default("example.com")
+            .desc("en", "The domain name for SSL.")
+            .desc("zh-tw", "用於 SSL 的域名。")
+            .build()])
+        .build(handle_set_ssl_domain),
+    CommandBuilder::new("ssl_dns_provider")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL DNS Provider")
+        .display_name("zh-tw", "SSL DNS 供應商")
+        .desc("en", "Specifies the DNS provider and API token for SSL.")
+        .desc("zh-tw", "指定用於 SSL 的 DNS 供應商及 API token。")
+        .params(vec![
+            ParameterBuilder::new(0)
+                .display_name("en", "Provider")
+                .display_name("zh-tw", "供應商")
+                .type_name("String")
+                .is_required(true)
+                .default("cloudflare")
+                .desc("en", "DNS provider name.")
+                .desc("zh-tw", "DNS 供應商名稱。")
+                .build(),
+            ParameterBuilder::new(1)
+                .display_name("en", "API Token")
+                .display_name("zh-tw", "API 令牌")
+                .type_name("String")
+                .is_required(true)
+                .default("token")
+                .desc("en", "API token for the DNS provider.")
+                .desc("zh-tw", "DNS 供應商的 API 令牌。")
+                .build()
+        ])
+        .build(handle_set_ssl_dns_provider),
+    CommandBuilder::new("ssl_dns_instructions_lang")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL DNS Instructions Language")
+        .display_name("zh-tw", "SSL DNS 指示語言")
+        .desc("en", "Specifies the language for DNS instructions.")
+        .desc("zh-tw", "指定 DNS 指示的語言。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Language")
+            .display_name("zh-tw", "語言")
+            .type_name("String")
+            .is_required(true)
+            .default("en")
+            .desc("en", "Language code for DNS instructions.")
+            .desc("zh-tw", "DNS 指示的語言代碼。")
+            .build()])
+        .build(handler_set_ssl_dns_instructions_lang)
 );
 
-pub fn handle_create_ssl(ctx: &mut ConfigContext) {
-    let enable = bool_str_to_bool(ctx.block_args.first().unwrap()).unwrap();
+pub fn handle_create_ssl(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let enable = get_config_parame(config, 0).expect("Missing SSL enable parameter");
+    let enable = bool_str_to_bool(&enable).unwrap();
     if !enable {
         return;
     }
@@ -90,69 +184,86 @@ pub fn handle_create_ssl(ctx: &mut ConfigContext) {
     ssl_ctx.ssl = true;
     let ssl_raw = Box::into_raw(ssl_ctx) as *mut u8;
     ctx.current_ctx = Some(AtomicPtr::new(ssl_raw));
-    ctx.current_block_type_id = Some(TypeId::of::<HttpSSLContext>());
+    ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpSSLContext>());
 }
 
-pub fn handle_set_ssl_email(ctx: &mut ConfigContext) {
-    let email = ctx.current_cmd_args.first().unwrap();
+pub fn handle_set_ssl_email(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let email = get_config_parame(config, 0).expect("Missing ssl_email parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.email = email.to_string();
     }
 }
 
-pub fn handle_set_ssl_domain(ctx: &mut ConfigContext) {
-    let domain = ctx.current_cmd_args.first().unwrap();
+pub fn handle_set_ssl_domain(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let domain = get_config_parame(config, 0).expect("Missing ssl_domain parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.domain = domain.to_string();
     }
 }
 
-pub fn handle_set_ssl_auto_renew(ctx: &mut ConfigContext) {
-    let enable = bool_str_to_bool(ctx.current_cmd_args.first().unwrap()).unwrap();
-
+pub fn handle_set_ssl_auto_renew(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let enable_str = get_config_parame(config, 0).expect("Missing ssl_auto_renew parameter");
+    let enable = bool_str_to_bool(&enable_str).unwrap();
     if !enable {
         return;
     }
-
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.auto_renew = true;
     }
 }
 
-pub fn handle_set_ssl_renew_day(ctx: &mut ConfigContext) {
-    let days = ctx
-        .current_cmd_args
-        .first()
-        .unwrap()
+pub fn handle_set_ssl_renew_day(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let days_str = get_config_parame(config, 0).expect("Missing ssl_renew_day parameter");
+    let days = days_str
         .parse::<u32>()
-        .unwrap();
+        .expect("Invalid number for ssl_renew_day");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.renew_days = days;
     }
 }
 
-pub fn handle_set_ssl_dns_provider(ctx: &mut ConfigContext) {
-    let provider = ctx.current_cmd_args.first().unwrap();
-    let api_token = ctx.current_cmd_args.get(1).unwrap();
+pub fn handle_set_ssl_dns_provider(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let provider = get_config_parame(config, 0).expect("Missing ssl_dns_provider parameter");
+    let api_token =
+        get_config_parame(config, 1).expect("Missing ssl_dns_provider API token parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
-        ssl_ctx.dns_provider = DnsProvider::from_str(provider).unwrap();
+        ssl_ctx.dns_provider = DnsProvider::from_str(&provider).unwrap();
         ssl_ctx.dns_provider_api_token = api_token.to_string();
     }
 }
 
-pub fn handler_set_ssl_dns_instructions_lang(ctx: &mut ConfigContext) {
-    let lang = ctx.current_cmd_args.first().unwrap();
+pub fn handler_set_ssl_dns_instructions_lang(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let lang = get_config_parame(config, 0).expect("Missing ssl_dns_instructions_lang parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.dns_instructions_lang = lang.to_string();
     }
 }
 
-fn get_ssl_ctx(ctx: &ConfigContext) -> Option<&mut HttpSSLContext> {
+fn get_ssl_ctx(
+    ctx: &crate::core::config::config_context::ConfigContext,
+) -> Option<&mut HttpSSLContext> {
     if let Some(ssl_ctx_ptr) = &ctx.current_ctx {
         let ssl_ptr = ssl_ctx_ptr.load(Ordering::SeqCst);
         return Some(unsafe { &mut *(ssl_ptr as *mut HttpSSLContext) });
     }
-
     None
 }
 

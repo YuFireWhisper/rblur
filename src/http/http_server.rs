@@ -1,11 +1,13 @@
 use http::{Method, StatusCode, Version};
 use rustls::pki_types::pem::PemObject;
+use serde_json::Value;
 use std::{
-    any::TypeId,
+    env,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicPtr, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -20,97 +22,142 @@ use rustls::{
 use crate::{
     core::{
         config::{
-            command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool,
-            storage::get_default_storage_path,
+            command::{CommandBuilder, ParameterBuilder},
+            config_context::ConfigContext,
+            config_manager::{bool_str_to_bool, get_config_parame},
         },
         processor::{HttpProcessor, Processor},
     },
     events::thread_pool::THREAD_POOL,
-    http::{http_manager::HttpContext, http_ssl::HttpSSL, web_config},
+    http::{http_ssl::HttpSSL, web_config},
     register_commands,
 };
 
 use super::{http_location::HttpLocationContext, web_config::WebConfig};
 
 register_commands!(
-    Command::new(
-        "server",
-        vec![TypeId::of::<HttpContext>()],
-        handle_create_server,
-    ),
-    Command::new(
-        "listen",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_set_listen
-    ),
-    Command::new(
-        "server_name",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_set_server_name
-    ),
-    Command::new(
-        "web_config",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_web_config
-    ),
+    CommandBuilder::new("server")
+        .is_block()
+        .allowed_parents(vec!["http".to_string()])
+        .display_name("en", "Server")
+        .display_name("zh-tw", "伺服器")
+        .desc("en", "Configures a server block.")
+        .desc("zh-tw", "配置伺服器塊。")
+        .build(handle_create_server),
+    CommandBuilder::new("listen")
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Listen")
+        .display_name("zh-tw", "監聽")
+        .desc("en", "Specifies the server's listening address.")
+        .desc("zh-tw", "指定伺服器監聽的位址。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Address")
+            .display_name("zh-tw", "位址")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "The IP address and port to listen on.")
+            .desc("zh-tw", "監聽的 IP 位址和埠號。")
+            .build()])
+        .build(handle_set_listen),
+    CommandBuilder::new("server_name")
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Server Name")
+        .display_name("zh-tw", "伺服器名稱")
+        .desc("en", "Adds a server name.")
+        .desc("zh-tw", "登錄伺服器名稱。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Name")
+            .display_name("zh-tw", "名稱")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "The server name to register.")
+            .desc("zh-tw", "要登錄的伺服器名稱。")
+            .build()])
+        .build(handle_set_server_name),
+    CommandBuilder::new("web_config")
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Web Config")
+        .display_name("zh-tw", "網頁配置")
+        .desc("en", "Enables web configuration for the server.")
+        .desc("zh-tw", "啟用伺服器的網頁配置。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Enable")
+            .display_name("zh-tw", "啟用")
+            .type_name("bool")
+            .is_required(true)
+            .default("true")
+            .desc("en", "Set to true to enable web configuration.")
+            .desc("zh-tw", "設置為 true 以啟用網頁配置。")
+            .build()])
+        .build(handle_web_config)
 );
 
-/// 建立 Server 區塊時建立 HttpServerContext，並順便初始化 processor
-pub fn handle_create_server(ctx: &mut ConfigContext) {
-    println!("Creating server");
+pub fn handle_create_server(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    _config: &Value,
+) {
+    println!("Creating server block");
     let server_ctx = Arc::new(HttpServerContext::new());
     let server_raw = Arc::into_raw(server_ctx.clone()) as *mut u8;
-    ctx.current_ctx = Some(atomic_ptr_new(server_raw));
-    ctx.current_block_type_id = Some(TypeId::of::<HttpServerContext>());
+    ctx.current_ctx = Some(AtomicPtr::new(server_raw));
+    ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpServerContext>());
 }
 
-/// 處理 listen 指令，設定伺服器監聽的位址
-pub fn handle_set_listen(ctx: &mut ConfigContext) {
-    let listen = ctx.current_cmd_args.first().unwrap();
+/// **handle_set_listen**
+/// 設定伺服器監聽位址，需提供一個參數：監聽位址 (String)。
+pub fn handle_set_listen(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let listen = get_config_parame(config, 0).expect("Missing listen parameter");
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
+        let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
         if !srv_ptr.is_null() {
             let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.set_listen(listen);
+            srv_ctx.set_listen(&listen);
         }
     }
 }
 
-/// 處理 server_name 指令，將伺服器名稱登錄到配置中
-pub fn handle_set_server_name(ctx: &mut ConfigContext) {
-    let server_name = ctx.current_cmd_args.first().unwrap();
+/// **handle_set_server_name**
+/// 登錄伺服器名稱，需提供一個參數：名稱 (String)。
+pub fn handle_set_server_name(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let server_name = get_config_parame(config, 0).expect("Missing server_name parameter");
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
+        let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
         if !srv_ptr.is_null() {
             let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.add_server_name(server_name);
+            srv_ctx.add_server_name(&server_name);
         }
     }
 }
 
-pub fn handle_web_config(ctx: &mut ConfigContext) {
-    let flag = ctx.current_cmd_args[0].clone();
-
+/// **handle_web_config**
+/// 設定伺服器的 web_config，需提供一個參數：啟用標記 (bool，以 "true" 或 "false" 表示)。
+pub fn handle_web_config(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let flag = get_config_parame(config, 0).expect("Missing web_config parameter");
     if !bool_str_to_bool(&flag).expect("Invalid web_config value") {
         return;
     }
-
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
+        let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
         if !srv_ptr.is_null() {
             let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
             let storage_path = get_default_storage_path();
-            let web_config = WebConfig::new(&storage_path);
-
+            let web_config = WebConfig::new(&storage_path).expect("Failed to create web config");
             if let Ok(mut web_config_lock) = srv_ctx.web_config.lock() {
                 *web_config_lock = Some(Arc::new(web_config));
             }
         }
     }
-}
-
-fn atomic_ptr_new<T>(ptr: *mut T) -> std::sync::atomic::AtomicPtr<u8> {
-    std::sync::atomic::AtomicPtr::new(ptr as *mut u8)
 }
 
 /// HttpServerContext 保存伺服器配置，包括監聽位址、伺服器名稱與 processor
@@ -382,4 +429,17 @@ fn handle_connection<S: Read + Write>(
     stream.write_all(&response_bytes)?;
     stream.flush()?;
     Ok(())
+}
+
+pub fn get_default_storage_path() -> PathBuf {
+    let app_name = env!("CARGO_PKG_NAME");
+
+    #[cfg(target_os = "linux")]
+    {
+        let base_dir = env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/lib"));
+
+        base_dir.join(".local/share").join(app_name)
+    }
 }

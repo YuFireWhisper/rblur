@@ -54,6 +54,10 @@ impl HttpProcessor {
 
 impl Processor for HttpProcessor {
     fn process(&self, request: Vec<u8>) -> ProcessorResult<ProcessorResponse> {
+        // 先輸出所有handler(調適用)
+        for (path, code, method) in self.handlers.keys() {
+            println!("Handler: {} {} {:#?}", method, code, path);
+        }
         let req = {
             let mut req = HttpRequest::new();
             req.parse(&request)
@@ -64,7 +68,12 @@ impl Processor for HttpProcessor {
         // 獲取Path，如果路逕中有參數，則去掉參數部分
         let path = req.path().split('?').next().unwrap().to_string();
         let method = req.method();
-        let handler = self.handlers.get(&(path, StatusCode::OK, method));
+        println!("Request: {} {}", method, path);
+        let handler = self
+            .handlers
+            .get(&(path.clone(), StatusCode::OK, method))
+            // 如果找不到對應的handler，則嘗試使用OPTIONS方法
+            .or_else(|| self.handlers.get(&(path, StatusCode::OK, &Method::OPTIONS)));
 
         let response = match handler {
             Some(handler) => handler(&req),

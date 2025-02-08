@@ -1,9 +1,8 @@
 use http::{StatusCode, Version};
 use reqwest::blocking::Client;
+use serde_json::Value;
 
-use crate::http::http_server::HttpServerContext;
 use std::{
-    any::TypeId,
     collections::HashMap,
     sync::{
         atomic::{AtomicPtr, Ordering},
@@ -12,7 +11,10 @@ use std::{
 };
 
 use crate::{
-    core::config::{command::Command, config_context::ConfigContext},
+    core::config::{
+        command::{CommandBuilder, ParameterBuilder},
+        config_manager::get_config_parame,
+    },
     register_commands,
 };
 
@@ -20,42 +22,84 @@ use super::{
     http_request::HttpRequest,
     http_response::{get_content_type, HttpResponse},
 };
-
 register_commands!(
-    Command::new(
-        "location",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_create_location,
-    ),
-    Command::new(
-        "static_file",
-        vec![TypeId::of::<HttpLocationContext>()],
-        handle_set_static_file
-    ),
-    Command::new(
-        "port_forward",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_port_forward,
-    ),
+    CommandBuilder::new("location")
+        .is_block()
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Location")
+        .display_name("zh-tw", "位置")
+        .desc("en", "Defines a location block.")
+        .desc("zh-tw", "定義一個位置塊。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Path")
+            .display_name("zh-tw", "路徑")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "Path to match.")
+            .desc("zh-tw", "要匹配的路徑。")
+            .build()])
+        .build(handle_create_location),
+    CommandBuilder::new("static_file")
+        .allowed_parents(vec!["location".to_string()])
+        .display_name("en", "Static File")
+        .display_name("zh-tw", "靜態檔案")
+        .desc("en", "Specifies a static file to serve.")
+        .desc("zh-tw", "指定此位置提供的靜態檔案。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "File Path")
+            .display_name("zh-tw", "檔案路徑")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "Path to the static file.")
+            .desc("zh-tw", "靜態檔案的路徑。")
+            .build()])
+        .build(handle_set_static_file),
+    CommandBuilder::new("port_forward")
+        .allowed_parents(vec!["location".to_string()])
+        .display_name("en", "Port Forward")
+        .display_name("zh-tw", "端口轉發")
+        .desc("en", "Forwards requests to another address.")
+        .desc("zh-tw", "將請求轉發到另一個地址。")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Forward Address")
+            .display_name("zh-tw", "轉發地址")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "Address to forward requests to.")
+            .desc("zh-tw", "請求轉發的地址。")
+            .build()])
+        .build(handle_port_forward)
 );
 
-/// 在 location 區塊開始時建立一個 HttpLocationContext，供子命令登錄 handler 使用
-pub fn handle_create_location(ctx: &mut ConfigContext) {
+pub fn handle_create_location(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    _config: &Value,
+) {
     let location_ctx = Arc::new(HttpLocationContext::new());
     let location_raw = Arc::into_raw(location_ctx.clone()) as *mut u8;
     ctx.current_ctx = Some(AtomicPtr::new(location_raw));
-    ctx.current_block_type_id = Some(TypeId::of::<HttpLocationContext>());
+    ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpLocationContext>());
 }
 
-pub fn handle_set_static_file(ctx: &mut ConfigContext) {
-    let file_path = ctx.current_cmd_args[0].clone();
-    println!("Static file path: {}", file_path);
+pub fn handle_set_static_file(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let file_path = get_config_parame(config, 0).expect("Missing static_file parameter");
+    if file_path.is_empty() {
+        return;
+    }
+    println!("Setting static file path: {}", file_path);
     if let Some(loc_ctx_ptr) = &ctx.current_ctx {
         let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
-        let content = Arc::new(std::fs::read_to_string(&file_path).unwrap());
+        let content =
+            Arc::new(std::fs::read_to_string(&file_path).expect("Failed to read static file"));
         let content_type = get_content_type(&file_path).to_string();
-        // 修改 handler 的簽名，符合 Processor 的要求：接受 &HttpRequest 參數
         let handler = Box::new(move |_req: &HttpRequest| {
+            println!("Serving static file: {}", file_path);
             let mut resp = HttpResponse::new();
             resp.set_status_line(Version::HTTP_11, StatusCode::OK);
             resp.set_header("Content-Type", &content_type);
@@ -67,21 +111,28 @@ pub fn handle_set_static_file(ctx: &mut ConfigContext) {
     }
 }
 
-pub fn handle_port_forward(ctx: &mut ConfigContext) {
-    let forward_addr = ctx.current_cmd_args[0].clone();
-    println!("Port forward address: {}", forward_addr);
+pub fn handle_port_forward(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let forward_addr = get_config_parame(config, 0).expect("Missing port_forward parameter");
+    if forward_addr.is_empty() {
+        return;
+    }
 
+    println!("Setting port forward address: {}", forward_addr);
     if let Some(loc_ctx_ptr) = &ctx.current_ctx {
         let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
+        let forward_addr = forward_addr.to_string();
         let handler = Box::new(move |req: &HttpRequest| {
             let client = Client::new();
             let url = format!("{}{}", forward_addr, req.path());
             println!("Forwarding request to: {}", url);
-
             let result = client.get(&url).send();
             match result {
                 Ok(response) => {
-                    let status = StatusCode::from_u16(response.status().as_u16()).expect("Invalid status code");
+                    let status = StatusCode::from_u16(response.status().as_u16())
+                        .expect("Invalid status code");
                     let body = response
                         .text()
                         .unwrap_or_else(|_| "Error reading forwarded response".into());
@@ -90,7 +141,7 @@ pub fn handle_port_forward(ctx: &mut ConfigContext) {
                     resp.set_body(&body);
                     resp
                 }
-                Err(_err) => {
+                Err(_) => {
                     let mut resp = HttpResponse::new();
                     resp.set_status_line(Version::HTTP_11, StatusCode::BAD_GATEWAY);
                     resp.set_body("Bad Gateway");

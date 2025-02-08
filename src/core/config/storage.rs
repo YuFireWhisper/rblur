@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    env, fmt, fs,
+    fmt, fs,
     io::{self, BufRead, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, RwLock},
@@ -1210,15 +1210,3 @@ impl Storage for MemStorage {
     }
 }
 
-pub fn get_default_storage_path() -> PathBuf {
-    let app_name = env!("CARGO_PKG_NAME");
-
-    #[cfg(target_os = "linux")]
-    {
-        let base_dir = env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/var/lib"));
-
-        base_dir.join(".local/share").join(app_name)
-    }
-}
