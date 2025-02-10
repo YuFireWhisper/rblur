@@ -18,6 +18,10 @@ pub enum WebConfigError {
     ValidationError(String),
 }
 
+const ACCESS_CONTROL_ALLOW_ORIGIN_LIST: [&str; 1] = ["http://localhost:5173"];
+const ACCESS_CONTROL_ALLOW_METHODS: &str = "GET, POST, OPTIONS";
+const ACCESS_CONTROL_ALLOW_HEADERS: &str = "Content-Type";
+
 /// WebConfig 結構提供對 JSON 配置檔案的讀取與修改功能。
 /// 每次操作皆從檔案讀取最新內容，以防止外部修改導致資料不一致。
 pub struct WebConfig {
@@ -449,6 +453,7 @@ pub fn add_all_web_config_handlers(
                     let mut resp = HttpResponse::new();
                     resp.set_status_line(req.version().to_owned(), StatusCode::OK);
                     resp.set_header("Content-Type", "application/json");
+                    add_cors_header(&mut resp);
                     resp.set_body(&serde_json::to_string_pretty(&json).unwrap_or_default());
                     resp
                 }
@@ -459,6 +464,7 @@ pub fn add_all_web_config_handlers(
                         StatusCode::INTERNAL_SERVER_ERROR,
                     );
                     resp.set_header("Content-Type", "text/plain");
+                    add_cors_header(&mut resp);
                     resp.set_body(&format!("Error: {:?}", e));
                     resp
                 }
@@ -481,6 +487,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::BAD_REQUEST);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body(&format!("Invalid JSON: {:?}", e));
                         return resp;
                     }
@@ -495,6 +502,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::OK);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body("Parameter updated");
                         resp
                     }
@@ -502,6 +510,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::BAD_REQUEST);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body(&format!("Error: {:?}", e));
                         resp
                     }
@@ -525,6 +534,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::BAD_REQUEST);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body(&format!("Invalid JSON: {:?}", e));
                         return resp;
                     }
@@ -542,6 +552,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::OK);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body("Block added");
                         resp
                     }
@@ -549,6 +560,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::BAD_REQUEST);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body(&format!("Error: {:?}", e));
                         resp
                     }
@@ -572,6 +584,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::BAD_REQUEST);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body(&format!("Invalid JSON: {:?}", e));
                         return resp;
                     }
@@ -585,6 +598,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::OK);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body("Block deleted");
                         resp
                     }
@@ -592,6 +606,7 @@ pub fn add_all_web_config_handlers(
                         let mut resp = HttpResponse::new();
                         resp.set_status_line(req.version().to_owned(), StatusCode::BAD_REQUEST);
                         resp.set_header("Content-Type", "text/plain");
+                        add_cors_header(&mut resp);
                         resp.set_body(&format!("Error: {:?}", e));
                         resp
                     }
@@ -599,4 +614,13 @@ pub fn add_all_web_config_handlers(
             }
         }),
     );
+}
+
+/// 用於對 Response 增加 CORS Header
+fn add_cors_header(resp: &mut HttpResponse) {
+    for origin in ACCESS_CONTROL_ALLOW_ORIGIN_LIST.iter() {
+        resp.set_header("Access-Control-Allow-Origin", origin);
+    }
+    resp.set_header("Access-Control-Allow-Methods", ACCESS_CONTROL_ALLOW_METHODS);
+    resp.set_header("Access-Control-Allow-Headers", ACCESS_CONTROL_ALLOW_HEADERS);
 }

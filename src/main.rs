@@ -17,7 +17,7 @@ fn main() {
 
     let root_ctx = config_loader::load_config(
         storage_path.to_str().unwrap(),
-        None,
+        config_path,
         vec!["http".to_string()],
     )
     .unwrap();
