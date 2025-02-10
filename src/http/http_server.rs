@@ -42,14 +42,14 @@ register_commands!(
         .display_name("en", "Server")
         .display_name("zh-tw", "伺服器")
         .desc("en", "Configures a server block.")
-        .desc("zh-tw", "配置伺服器塊。")
+        .desc("zh-tw", "配置伺服器塊")
         .build(handle_create_server),
     CommandBuilder::new("listen")
         .allowed_parents(vec!["server".to_string()])
         .display_name("en", "Listen")
         .display_name("zh-tw", "監聽")
         .desc("en", "Specifies the server's listening address.")
-        .desc("zh-tw", "指定伺服器監聽的位址。")
+        .desc("zh-tw", "指定伺服器監聽的位址")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Address")
             .display_name("zh-tw", "位址")
@@ -57,7 +57,7 @@ register_commands!(
             .is_required(true)
             .default("")
             .desc("en", "The IP address and port to listen on.")
-            .desc("zh-tw", "監聽的 IP 位址和埠號。")
+            .desc("zh-tw", "監聽的 IP 位址和埠號")
             .build()])
         .build(handle_set_listen),
     CommandBuilder::new("server_name")
@@ -65,7 +65,7 @@ register_commands!(
         .display_name("en", "Server Name")
         .display_name("zh-tw", "伺服器名稱")
         .desc("en", "Adds a server name.")
-        .desc("zh-tw", "登錄伺服器名稱。")
+        .desc("zh-tw", "登錄伺服器名稱")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Name")
             .display_name("zh-tw", "名稱")
@@ -73,7 +73,7 @@ register_commands!(
             .is_required(true)
             .default("")
             .desc("en", "The server name to register.")
-            .desc("zh-tw", "要登錄的伺服器名稱。")
+            .desc("zh-tw", "要登錄的伺服器名稱")
             .build()])
         .build(handle_set_server_name),
     CommandBuilder::new("web_config")
@@ -81,7 +81,7 @@ register_commands!(
         .display_name("en", "Web Config")
         .display_name("zh-tw", "網頁配置")
         .desc("en", "Enables web configuration for the server.")
-        .desc("zh-tw", "啟用伺服器的網頁配置。")
+        .desc("zh-tw", "啟用伺服器的網頁配置")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Enable")
             .display_name("zh-tw", "啟用")
@@ -89,7 +89,7 @@ register_commands!(
             .is_required(true)
             .default("true")
             .desc("en", "Set to true to enable web configuration.")
-            .desc("zh-tw", "設置為 true 以啟用網頁配置。")
+            .desc("zh-tw", "設置為 true 以啟用網頁配置")
             .build()])
         .build(handle_web_config)
 );
@@ -106,7 +106,7 @@ pub fn handle_create_server(
 }
 
 /// **handle_set_listen**
-/// 設定伺服器監聽位址，需提供一個參數：監聽位址 (String)。
+/// 設定伺服器監聽位址，需提供一個參數：監聽位址 (String)
 pub fn handle_set_listen(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -122,7 +122,7 @@ pub fn handle_set_listen(
 }
 
 /// **handle_set_server_name**
-/// 登錄伺服器名稱，需提供一個參數：名稱 (String)。
+/// 登錄伺服器名稱，需提供一個參數：名稱 (String)
 pub fn handle_set_server_name(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -138,7 +138,7 @@ pub fn handle_set_server_name(
 }
 
 /// **handle_web_config**
-/// 設定伺服器的 web_config，需提供一個參數：啟用標記 (bool，以 "true" 或 "false" 表示)。
+/// 設定伺服器的 web_config，需提供一個參數：啟用標記 (bool，以 "true" 或 "false" 表示)
 pub fn handle_web_config(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -370,8 +370,11 @@ fn process_connection(
     http_version: Arc<Version>,
     ssl_config: Option<Arc<ServerConfig>>,
 ) {
+    println!("Processing connection");
     if let Ok(pool) = THREAD_POOL.lock() {
+        println!("Processing connection in thread pool");
         let _ = pool.spawn(move || {
+            println!("Handling connection");
             if let Err(e) = if let Some(ssl_cfg) = ssl_config {
                 process_tls_connection(stream, ssl_cfg, &processor, &http_version)
             } else {
@@ -399,6 +402,7 @@ fn process_tls_connection(
     processor: &HttpProcessor,
     http_version: &Version,
 ) -> std::io::Result<()> {
+    println!("Processing TLS connection");
     let mut conn = ServerConnection::new(ssl_cfg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
