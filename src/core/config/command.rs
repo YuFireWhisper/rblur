@@ -61,10 +61,8 @@ impl ParameterBuilder {
     }
 
     pub fn display_name(mut self, lang: &str, name: &str) -> Self {
-        self.display_name = [(lang.to_string(), name.to_string())]
-            .iter()
-            .cloned()
-            .collect();
+        // 插入一個元素到 HashMap
+        self.display_name.insert(lang.to_string(), name.to_string());
         self
     }
 
@@ -84,10 +82,7 @@ impl ParameterBuilder {
     }
 
     pub fn desc(mut self, lang: &str, desc: &str) -> Self {
-        self.desc = [(lang.to_string(), desc.to_string())]
-            .iter()
-            .cloned()
-            .collect();
+        self.desc.insert(lang.to_string(), desc.to_string());
         self
     }
 
@@ -171,18 +166,12 @@ impl CommandBuilder {
     }
 
     pub fn display_name(mut self, lang: &str, name: &str) -> Self {
-        self.display_name = [(lang.to_string(), name.to_string())]
-            .iter()
-            .cloned()
-            .collect();
+        self.display_name.insert(lang.to_string(), name.to_string());
         self
     }
 
     pub fn desc(mut self, lang: &str, desc: &str) -> Self {
-        self.desc = [(lang.to_string(), desc.to_string())]
-            .iter()
-            .cloned()
-            .collect();
+        self.desc.insert(lang.to_string(), desc.to_string());
         self
     }
 
