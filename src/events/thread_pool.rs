@@ -1,28 +1,18 @@
-use core::fmt;
 use std::{
     collections::VecDeque,
-    error::Error,
     sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
 use once_cell::sync::Lazy;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ThreadPoolError {
+    #[error("Thread pool task queue is full")]
     QueueFull,
 }
-
-impl fmt::Display for ThreadPoolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ThreadPoolError::QueueFull => write!(f, "Thread pool task queue is full"),
-        }
-    }
-}
-
-impl Error for ThreadPoolError {}
 
 pub struct ThreadPoolConfig {
     pub keep_alive: Duration,
@@ -88,11 +78,18 @@ impl ThreadPool {
             return Err(ThreadPoolError::QueueFull);
         }
         queue.push_back(task);
+        let task_count = queue.len();
+        drop(queue);
 
-        let workers = self.workers.lock().unwrap();
-        if queue.len() > workers.len() && workers.len() < self.max_threads {
-            drop(workers);
+        // 清除已失效的 worker，以取得真正的活動 worker 數量
+        let mut workers_guard = self.workers.lock().unwrap();
+        workers_guard.retain(|w| w.thread.is_some());
+        let active_count = workers_guard.len();
+        if task_count > active_count && active_count < self.max_threads {
+            drop(workers_guard);
             self.spawn_worker();
+        } else {
+            drop(workers_guard);
         }
 
         cvar.notify_one();
@@ -112,7 +109,6 @@ impl ThreadPool {
                 last_active: Instant::now(),
                 thread: None,
             });
-
             id
         };
 
