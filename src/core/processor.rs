@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 type ProcessorResult<T> = Result<T, ProcessorError>;
+
 #[derive(Debug, Error)]
 pub enum ProcessorError {
     #[error("Parsing request failed")]
@@ -11,6 +12,7 @@ pub enum ProcessorError {
 }
 
 type ProcessorResponse = Vec<u8>;
+
 pub trait Processor {
     fn process(&self, request: Vec<u8>) -> ProcessorResult<ProcessorResponse>;
 }
@@ -54,32 +56,43 @@ impl HttpProcessor {
 
 impl Processor for HttpProcessor {
     fn process(&self, request: Vec<u8>) -> ProcessorResult<ProcessorResponse> {
-        // 先輸出所有handler(調適用)
         for (path, code, method) in self.handlers.keys() {
-            println!("Handler: {} {} {:#?}", method, code, path);
+            println!("Handler: {} {} {}", method, code, path);
         }
-        let req = {
-            let mut req = HttpRequest::new();
-            req.parse(&request)
-                .map_err(|_| ProcessorError::ParseError)?;
-            req
-        };
 
-        // 獲取Path，如果路逕中有參數，則去掉參數部分
-        let path = req.path().split('?').next().unwrap().to_string();
+        let mut req = HttpRequest::new();
+        req.parse(&request)
+            .map_err(|_| ProcessorError::ParseError)?;
+
+        let clean_path = req.path().split('?').next().unwrap().to_owned();
         let method = req.method();
-        println!("Request: {} {}", method, path);
+        println!("Request: {} {}", method, clean_path);
+
         let handler = self
             .handlers
-            .get(&(path.clone(), StatusCode::OK, method))
-            // 如果找不到對應的handler，則嘗試使用OPTIONS方法
-            .or_else(|| self.handlers.get(&(path, StatusCode::OK, &Method::OPTIONS)));
+            .get(&(clean_path.clone(), StatusCode::OK, method))
+            .or_else(|| {
+                self.handlers
+                    .get(&(clean_path, StatusCode::OK, &Method::OPTIONS))
+            });
 
-        let response = match handler {
-            Some(handler) => handler(&req),
-            None => Self::create_404_response(req.version()),
+        if *method == Method::OPTIONS && handler.is_none() {
+            let mut response = HttpResponse::new();
+            response.set_status_line(*req.version(), StatusCode::OK);
+            response.set_header("Content-Type", "text/plain");
+            response.set_body("");
+            return Ok(response.as_bytes());
+        }
+
+        let response = if let Some(handler) = handler {
+            handler(&req)
+        } else {
+            Self::create_404_response(req.version())
         };
 
+        println!("Response: {}", response.status_line);
+        println!("Header: {}", response.header);
+        println!("Body: {}", response.body);
         Ok(response.as_bytes())
     }
 }
