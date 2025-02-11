@@ -22,54 +22,73 @@ use super::{
     http_request::HttpRequest,
     http_response::{get_content_type, HttpResponse},
 };
+
 register_commands!(
     CommandBuilder::new("location")
         .is_block()
         .allowed_parents(vec!["server".to_string()])
         .display_name("en", "Location")
         .display_name("zh-tw", "位置")
-        .desc("en", "Defines a location block.")
-        .desc("zh-tw", "定義一個位置塊。")
+        .desc(
+            "en",
+            "Creates a new configuration block for defining a specific URL path handling"
+        )
+        .desc("zh-tw", "建立處理特定 URL 路徑的配置區塊")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Path")
             .display_name("zh-tw", "路徑")
             .type_name("String")
             .is_required(true)
             .default("")
-            .desc("en", "Path to match.")
-            .desc("zh-tw", "要匹配的路徑。")
+            .desc(
+                "en",
+                "Specifies the URL path pattern to be matched for this location block"
+            )
+            .desc("zh-tw", "定義此位置區塊要匹配的 URL 路徑模式")
             .build()])
         .build(handle_create_location),
     CommandBuilder::new("static_file")
         .allowed_parents(vec!["location".to_string()])
         .display_name("en", "Static File")
         .display_name("zh-tw", "靜態檔案")
-        .desc("en", "Specifies a static file to serve.")
-        .desc("zh-tw", "指定此位置提供的靜態檔案。")
+        .desc(
+            "en",
+            "Configures serving a static file from the specified path"
+        )
+        .desc("zh-tw", "配置從指定路徑提供靜態檔案服務")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "File Path")
             .display_name("zh-tw", "檔案路徑")
             .type_name("String")
             .is_required(true)
             .default("")
-            .desc("en", "Path to the static file.")
-            .desc("zh-tw", "靜態檔案的路徑。")
+            .desc(
+                "en",
+                "Full system path to the static file that will be served"
+            )
+            .desc("zh-tw", "將被提供服務的靜態檔案的完整系統路徑")
             .build()])
         .build(handle_set_static_file),
     CommandBuilder::new("port_forward")
         .allowed_parents(vec!["location".to_string()])
         .display_name("en", "Port Forward")
         .display_name("zh-tw", "端口轉發")
-        .desc("en", "Forwards requests to another address.")
-        .desc("zh-tw", "將請求轉發到另一個地址。")
+        .desc(
+            "en",
+            "Redirects incoming requests to a different server address"
+        )
+        .desc("zh-tw", "將收到的請求重新導向到另一個伺服器地址")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Forward Address")
             .display_name("zh-tw", "轉發地址")
             .type_name("String")
             .is_required(true)
             .default("")
-            .desc("en", "Address to forward requests to.")
-            .desc("zh-tw", "請求轉發的地址。")
+            .desc(
+                "en",
+                "Target server address where requests will be forwarded"
+            )
+            .desc("zh-tw", "請求將被轉發的目標伺服器地址")
             .build()])
         .build(handle_port_forward)
 );

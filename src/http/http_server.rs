@@ -41,55 +41,67 @@ register_commands!(
         .allowed_parents(vec!["http".to_string()])
         .display_name("en", "Server")
         .display_name("zh-tw", "伺服器")
-        .desc("en", "Configures a server block.")
-        .desc("zh-tw", "配置伺服器塊")
+        .desc(
+            "en",
+            "Creates a new server configuration block within the HTTP context"
+        )
+        .desc("zh-tw", "在 HTTP 上下文中建立新的伺服器配置區塊")
         .build(handle_create_server),
     CommandBuilder::new("listen")
         .allowed_parents(vec!["server".to_string()])
         .display_name("en", "Listen")
         .display_name("zh-tw", "監聽")
-        .desc("en", "Specifies the server's listening address.")
-        .desc("zh-tw", "指定伺服器監聽的位址")
+        .desc(
+            "en",
+            "Configures the network interface and port for server connections"
+        )
+        .desc("zh-tw", "配置伺服器連線的網路介面和埠號")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Address")
-            .display_name("zh-tw", "位址")
+            .display_name("zh-tw", "監聽位址")
             .type_name("String")
             .is_required(true)
             .default("")
-            .desc("en", "The IP address and port to listen on.")
-            .desc("zh-tw", "監聽的 IP 位址和埠號")
+            .desc(
+                "en",
+                "Network interface IP address and port number for server to accept connections"
+            )
+            .desc("zh-tw", "伺服器接受連線的網路介面 IP 位址和埠號")
             .build()])
         .build(handle_set_listen),
     CommandBuilder::new("server_name")
         .allowed_parents(vec!["server".to_string()])
         .display_name("en", "Server Name")
         .display_name("zh-tw", "伺服器名稱")
-        .desc("en", "Adds a server name.")
-        .desc("zh-tw", "登錄伺服器名稱")
+        .desc("en", "Assigns a name to identify the server configuration")
+        .desc("zh-tw", "為伺服器配置指定識別名稱")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Name")
-            .display_name("zh-tw", "名稱")
+            .display_name("zh-tw", "伺服器名稱")
             .type_name("String")
             .is_required(true)
             .default("")
-            .desc("en", "The server name to register.")
-            .desc("zh-tw", "要登錄的伺服器名稱")
+            .desc("en", "Unique identifier for the server configuration")
+            .desc("zh-tw", "伺服器配置的唯一識別名稱")
             .build()])
         .build(handle_set_server_name),
     CommandBuilder::new("web_config")
         .allowed_parents(vec!["server".to_string()])
         .display_name("en", "Web Config")
         .display_name("zh-tw", "網頁配置")
-        .desc("en", "Enables web configuration for the server.")
-        .desc("zh-tw", "啟用伺服器的網頁配置")
+        .desc(
+            "en",
+            "Enables or disables web-based configuration for the server"
+        )
+        .desc("zh-tw", "啟用或停用伺服器的網頁配置功能")
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Enable")
-            .display_name("zh-tw", "啟用")
+            .display_name("zh-tw", "網頁配置")
             .type_name("bool")
             .is_required(true)
             .default("true")
-            .desc("en", "Set to true to enable web configuration.")
-            .desc("zh-tw", "設置為 true 以啟用網頁配置")
+            .desc("en", "Toggles web configuration interface on or off")
+            .desc("zh-tw", "開啟或關閉網頁配置介面")
             .build()])
         .build(handle_web_config)
 );
