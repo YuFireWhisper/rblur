@@ -92,7 +92,6 @@ impl Processor for HttpProcessor {
 
         println!("Response: {}", response.status_line);
         println!("Header: {}", response.header);
-        println!("Body: {}", response.body);
         Ok(response.as_bytes())
     }
 }
