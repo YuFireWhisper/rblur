@@ -49,8 +49,8 @@ register_commands!(
         .build(handle_create_server),
     CommandBuilder::new("listen")
         .allowed_parents(vec!["server".to_string()])
-        .display_name("en", "Listen")
-        .display_name("zh-tw", "監聽")
+        .display_name("en", "Listen Address")
+        .display_name("zh-tw", "監聽位址")
         .desc(
             "en",
             "Configures the network interface and port for server connections"
@@ -88,7 +88,7 @@ register_commands!(
     CommandBuilder::new("web_config")
         .allowed_parents(vec!["server".to_string()])
         .display_name("en", "Web Config")
-        .display_name("zh-tw", "網頁配置")
+        .display_name("zh-tw", "網頁配置功能")
         .desc(
             "en",
             "Enables or disables web-based configuration for the server"
