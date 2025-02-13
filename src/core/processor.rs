@@ -27,14 +27,12 @@ pub trait Processor {
 pub type HttpHandler = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>;
 pub type PathMapper = dyn Fn(&str) -> Option<String> + Send + Sync + 'static;
 
-/// 用於靜態檔案服務的設定，除了記錄要服務的檔案或目錄之外，
-/// 還能指定 URL prefix（例如 /web_config）以及要剝除的檔案路徑前綴（strip_prefix）。
 #[derive(Default)]
 pub struct StaticFileConfig {
-    prefix: Option<String>, // 用戶指定的 URL 前綴
-    file_path: PathBuf,     // 要服務的檔案或目錄
+    prefix: Option<String>,
+    file_path: PathBuf,
     path_mapper: Option<Arc<PathMapper>>,
-    strip_prefix: Option<PathBuf>, // 從檔案完整路徑中剝除的部分
+    strip_prefix: Option<PathBuf>,
 }
 
 impl StaticFileConfig {
@@ -64,7 +62,6 @@ impl StaticFileConfig {
         self
     }
 
-    /// 指定服務時需剝除的檔案路徑前綴（例如靜態目錄的根目錄）
     pub fn with_strip_prefix(mut self, prefix: impl AsRef<Path>) -> Self {
         self.strip_prefix = Some(prefix.as_ref().to_path_buf());
         self
@@ -92,7 +89,6 @@ impl HttpProcessor {
         method: &'static Method,
         handler: HttpHandler,
     ) {
-        // 若 URL 以 '/' 結尾但非根目錄則去除尾部 '/'
         let normalized_path = if path != "/" && path.ends_with('/') {
             path.trim_end_matches('/').to_string()
         } else {
@@ -102,14 +98,12 @@ impl HttpProcessor {
             .insert((normalized_path, code, method), Arc::new(handler));
     }
 
-    /// 將目錄直接註冊至根目錄，並自動剝除指定目錄的路徑前綴
     pub fn serve_static(&mut self, path: impl AsRef<Path>) -> Result<(), ProcessorError> {
         let p = path.as_ref();
         let config = StaticFileConfig::new(p).with_strip_prefix(p);
         self.serve_static_with_config(config)
     }
 
-    /// 將指定目錄服務至特定 URL 前綴
     pub fn serve_static_at(
         &mut self,
         prefix: impl AsRef<str>,
@@ -122,7 +116,6 @@ impl HttpProcessor {
         self.serve_static_with_config(config)
     }
 
-    /// 將單一檔案映射至指定 URL
     pub fn serve_file_at(
         &mut self,
         url_path: impl AsRef<str>,
@@ -131,12 +124,10 @@ impl HttpProcessor {
         if file_path.as_ref().is_dir() {
             return Err(ProcessorError::NotAFile);
         }
-        // 直接使用用戶指定的 URL，不使用 strip_prefix
         let config = StaticFileConfig::new(file_path).with_prefix(url_path);
         self.serve_static_file_with_config(&config.file_path, config.prefix.as_deref(), None)
     }
 
-    /// 使用自訂邏輯來處理路徑映射
     pub fn serve_static_with_mapper(
         &mut self,
         path: impl AsRef<Path>,
@@ -146,11 +137,10 @@ impl HttpProcessor {
         self.serve_static_with_config(config)
     }
 
-    /// 根據 config 判斷是服務目錄或單一檔案
     fn serve_static_with_config(&mut self, config: StaticFileConfig) -> Result<(), ProcessorError> {
         let path = config.file_path;
         if path.is_dir() {
-            self.serve_static_dir_with_config(
+            self.serve_static_directory_with_config(
                 &path,
                 config.prefix.as_deref(),
                 config.strip_prefix.as_deref(),
@@ -170,14 +160,12 @@ impl HttpProcessor {
         self.excluded_files.push(path.as_ref().to_path_buf());
     }
 
-    /// 讀取檔案內容，並以 Arc 包裹後返回
     fn read_file_content(file_path: &Path) -> Result<Arc<String>, ProcessorError> {
         let content = std::fs::read_to_string(file_path)
             .map_err(|e| ProcessorError::FileError(e.to_string()))?;
         Ok(Arc::new(content))
     }
 
-    /// 根據傳入的 prefix 與 strip_prefix 計算 URL 路徑
     fn compute_url_path(
         file_path: &Path,
         prefix: Option<&str>,
@@ -216,7 +204,6 @@ impl HttpProcessor {
         format!("/{}", file_path.to_string_lossy().replace("\\", "/"))
     }
 
-    /// 封裝建立靜態檔案 handler 與註冊操作
     fn register_static_handler(
         &mut self,
         url_path: &str,
@@ -233,7 +220,6 @@ impl HttpProcessor {
         self.add_handler(url_path.to_string(), StatusCode::OK, &Method::GET, handler);
     }
 
-    /// 根據參數決定 URL 並註冊單一檔案 handler
     fn serve_static_file_with_config(
         &mut self,
         file_path: &Path,
@@ -241,7 +227,7 @@ impl HttpProcessor {
         strip_prefix: Option<&Path>,
     ) -> Result<(), ProcessorError> {
         if self.excluded_files.contains(&file_path.to_path_buf()) {
-            return Ok(());
+            return Ok(()); // Skip excluded files
         }
         let content = Self::read_file_content(file_path)?;
         let content_type = get_content_type(&file_path.to_string_lossy()).to_string();
@@ -250,8 +236,7 @@ impl HttpProcessor {
         Ok(())
     }
 
-    /// 遞迴處理目錄中所有檔案，依照 prefix/strip_prefix 或自訂 mapper 註冊 handler
-    fn serve_static_dir_with_config(
+    fn serve_static_directory_with_config(
         &mut self,
         dir_path: &Path,
         prefix: Option<&str>,
@@ -269,18 +254,34 @@ impl HttpProcessor {
             let path = entry.path();
 
             if path.is_file() {
-                if let Some(ref mapper) = mapper {
-                    if let Some(mapped_path) = mapper(&path.to_string_lossy()) {
-                        self.serve_file_at(mapped_path, &path)?;
-                    } else {
-                        self.serve_static_file_with_config(&path, prefix, strip_prefix)?;
-                    }
-                } else {
-                    self.serve_static_file_with_config(&path, prefix, strip_prefix)?;
-                }
+                self.serve_static_entry(&path, prefix, strip_prefix, mapper.clone())?;
             } else if path.is_dir() {
-                self.serve_static_dir_with_config(&path, prefix, strip_prefix, mapper.clone())?;
+                self.serve_static_directory_with_config(
+                    &path,
+                    prefix,
+                    strip_prefix,
+                    mapper.clone(),
+                )?;
             }
+        }
+        Ok(())
+    }
+
+    fn serve_static_entry(
+        &mut self,
+        path: &Path,
+        prefix: Option<&str>,
+        strip_prefix: Option<&Path>,
+        mapper: Option<Arc<PathMapper>>,
+    ) -> Result<(), ProcessorError> {
+        if let Some(ref mapper) = mapper {
+            if let Some(mapped_path) = mapper(&path.to_string_lossy()) {
+                self.serve_file_at(mapped_path, path)?;
+            } else {
+                self.serve_static_file_with_config(path, prefix, strip_prefix)?;
+            }
+        } else {
+            self.serve_static_file_with_config(path, prefix, strip_prefix)?;
         }
         Ok(())
     }
@@ -351,7 +352,6 @@ impl Processor for HttpProcessor {
         let method = req.method();
         println!("Request: {} {}", method, clean_path);
 
-        // 列印目前所有註冊的 handler 資訊（僅作除錯用）
         self.handlers
             .iter()
             .for_each(|((path, status, method), _)| {
