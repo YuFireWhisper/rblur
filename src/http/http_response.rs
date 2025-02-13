@@ -2,35 +2,16 @@ use http::{StatusCode, Version};
 
 use super::http_request::http_version_to_string;
 
-#[derive(PartialEq)]
+#[derive(Default, PartialEq)]
 pub struct HttpResponse {
     pub status_line: String,
     pub header: String,
     pub body: String,
 }
 
-impl Default for HttpResponse {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl HttpResponse {
     pub fn new() -> Self {
-        let mut response = HttpResponse {
-            status_line: String::new(),
-            header: String::new(),
-            body: String::new(),
-        };
-
-        response.set_default_cors_headers();
-        response
-    }
-
-    fn set_default_cors_headers(&mut self) {
-        self.set_header("Access-Control-Allow-Origin", "http://localhost:5173");
-        self.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        self.set_header("Access-Control-Allow-Headers", "Content-Type");
+        Self::default()
     }
 
     pub fn set_status_line(&mut self, version: Version, status_code: StatusCode) -> &mut Self {
