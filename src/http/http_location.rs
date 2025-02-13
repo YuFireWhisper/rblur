@@ -13,7 +13,7 @@ use std::{
 use crate::{
     core::config::{
         command::{CommandBuilder, ParameterBuilder},
-        config_manager::get_config_parame,
+        config_manager::get_config_param,
     },
     register_commands,
 };
@@ -107,7 +107,7 @@ pub fn handle_set_static_file(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let file_path = get_config_parame(config, 0).expect("Missing static_file parameter");
+    let file_path = get_config_param(config, 0).expect("Missing static_file parameter");
     if file_path.is_empty() {
         return;
     }
@@ -134,7 +134,7 @@ pub fn handle_port_forward(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let forward_addr = get_config_parame(config, 0).expect("Missing port_forward parameter");
+    let forward_addr = get_config_param(config, 0).expect("Missing port_forward parameter");
     if forward_addr.is_empty() {
         return;
     }

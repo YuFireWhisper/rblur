@@ -17,7 +17,7 @@ use crate::{
     core::config::{
         command::{CommandBuilder, ParameterBuilder},
         config_context::ConfigContext,
-        config_manager::{bool_str_to_bool, get_config_parame},
+        config_manager::{bool_str_to_bool, get_config_param},
     },
     register_commands,
 };
@@ -190,7 +190,7 @@ pub fn handle_create_ssl(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let enable = get_config_parame(config, 0).expect("Missing SSL enable parameter");
+    let enable = get_config_param(config, 0).expect("Missing SSL enable parameter");
     let enable = bool_str_to_bool(&enable).unwrap();
     if !enable {
         return;
@@ -206,7 +206,7 @@ pub fn handle_set_ssl_email(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let email = get_config_parame(config, 0).expect("Missing ssl_email parameter");
+    let email = get_config_param(config, 0).expect("Missing ssl_email parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.email = email.to_string();
     }
@@ -216,7 +216,7 @@ pub fn handle_set_ssl_domain(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let domain = get_config_parame(config, 0).expect("Missing ssl_domain parameter");
+    let domain = get_config_param(config, 0).expect("Missing ssl_domain parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.domain = domain.to_string();
     }
@@ -226,7 +226,7 @@ pub fn handle_set_ssl_auto_renew(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let enable_str = get_config_parame(config, 0).expect("Missing ssl_auto_renew parameter");
+    let enable_str = get_config_param(config, 0).expect("Missing ssl_auto_renew parameter");
     let enable = bool_str_to_bool(&enable_str).unwrap();
     if !enable {
         return;
@@ -240,7 +240,7 @@ pub fn handle_set_ssl_renew_day(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let days_str = get_config_parame(config, 0).expect("Missing ssl_renew_day parameter");
+    let days_str = get_config_param(config, 0).expect("Missing ssl_renew_day parameter");
     let days = days_str
         .parse::<u32>()
         .expect("Invalid number for ssl_renew_day");
@@ -253,9 +253,9 @@ pub fn handle_set_ssl_dns_provider(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let provider = get_config_parame(config, 0).expect("Missing ssl_dns_provider parameter");
+    let provider = get_config_param(config, 0).expect("Missing ssl_dns_provider parameter");
     let api_token =
-        get_config_parame(config, 1).expect("Missing ssl_dns_provider API token parameter");
+        get_config_param(config, 1).expect("Missing ssl_dns_provider API token parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.dns_provider = DnsProvider::from_str(&provider).unwrap();
         ssl_ctx.dns_provider_api_token = api_token.to_string();
@@ -266,7 +266,7 @@ pub fn handler_set_ssl_dns_instructions_lang(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let lang = get_config_parame(config, 0).expect("Missing ssl_dns_instructions_lang parameter");
+    let lang = get_config_param(config, 0).expect("Missing ssl_dns_instructions_lang parameter");
     if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
         ssl_ctx.dns_instructions_lang = lang.to_string();
     }

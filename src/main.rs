@@ -3,13 +3,11 @@ use std::time::Duration;
 
 use blur::http::http_server::get_default_storage_path;
 use blur::{
-    core::config::{config_loader, config_manager::ConfigManager},
+    core::config::config_loader,
     http::http_manager::HttpManager,
 };
 
 fn main() {
-    ConfigManager::init();
-
     let config_path = Some("/home/yuwhisper/projects/blur/config/config_template");
     let storage_path = get_default_storage_path();
 

@@ -24,7 +24,7 @@ use crate::{
         config::{
             command::{CommandBuilder, ParameterBuilder},
             config_context::ConfigContext,
-            config_manager::{bool_str_to_bool, get_config_parame},
+            config_manager::{bool_str_to_bool, get_config_param},
         },
         processor::{HttpProcessor, Processor},
     },
@@ -123,7 +123,7 @@ pub fn handle_set_listen(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let listen = get_config_parame(config, 0).expect("Missing listen parameter");
+    let listen = get_config_param(config, 0).expect("Missing listen parameter");
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
         let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
         if !srv_ptr.is_null() {
@@ -139,7 +139,7 @@ pub fn handle_set_server_name(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let server_name = get_config_parame(config, 0).expect("Missing server_name parameter");
+    let server_name = get_config_param(config, 0).expect("Missing server_name parameter");
     if let Some(srv_ctx_ptr) = &ctx.current_ctx {
         let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
         if !srv_ptr.is_null() {
@@ -155,7 +155,7 @@ pub fn handle_web_config(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
-    let flag = get_config_parame(config, 0).expect("Missing web_config parameter");
+    let flag = get_config_param(config, 0).expect("Missing web_config parameter");
     if !bool_str_to_bool(&flag).expect("Invalid web_config value") {
         return;
     }
