@@ -4,28 +4,22 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+use super::command::Command;
+use super::config_manager::get_command;
+
+#[derive(Debug, Error)]
 pub enum ConfigError {
-    IoError(io::Error),
-    JsonError(serde_json::Error),
+    #[error("I/O error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("JSON error: {0}")]
+    JsonError(#[from] serde_json::Error),
+    #[error("Validation error: {0}")]
     ValidationError(String),
 }
 
-impl From<io::Error> for ConfigError {
-    fn from(e: io::Error) -> Self {
-        ConfigError::IoError(e)
-    }
-}
-
-impl From<serde_json::Error> for ConfigError {
-    fn from(e: serde_json::Error) -> Self {
-        ConfigError::JsonError(e)
-    }
-}
-
-/// 對 JSON 進行合併，對於物件採用遞迴合併；對於陣列（代表非唯一的塊），
-/// 若模板陣列非空，則以模板第一個元素為基礎，對 user 陣列中每個項目分別合併。
 fn merge_config(template: &Value, user: &Value) -> Value {
     match (template, user) {
         (Value::Object(t_map), Value::Object(u_map)) => {
@@ -55,7 +49,6 @@ fn merge_config(template: &Value, user: &Value) -> Value {
     }
 }
 
-/// 解析配置文件（類 Nginx 語法）的文字內容，並轉換為 JSON 結構。
 fn parse_nginx_config(file_path: &str) -> Result<Value, ConfigError> {
     let content = fs::read_to_string(file_path)?;
     let tokens = tokenize(&content);
@@ -64,7 +57,6 @@ fn parse_nginx_config(file_path: &str) -> Result<Value, ConfigError> {
     Ok(json_value)
 }
 
-/// 定義解析器用的 Token 類型
 #[derive(Debug, Clone)]
 enum Token {
     Word(String),
@@ -73,13 +65,11 @@ enum Token {
     Semicolon,
 }
 
-/// 將輸入文字斷詞為 Token 列表
 fn tokenize(input: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut pos = 0;
     let bytes = input.as_bytes();
     while pos < bytes.len() {
-        // 略過空白與註解
         while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
@@ -123,7 +113,6 @@ fn tokenize(input: &str) -> Vec<Token> {
     tokens
 }
 
-/// 代表解析後的配置節點
 #[derive(Debug)]
 struct ConfigNode {
     command: String,
@@ -131,7 +120,6 @@ struct ConfigNode {
     children: Vec<ConfigNode>,
 }
 
-/// 遞迴解析 Token，返回 ConfigNode 列表及新位置
 fn parse_tokens(tokens: &[Token], mut pos: usize) -> Result<(Vec<ConfigNode>, usize), ConfigError> {
     let mut nodes = Vec::new();
     while pos < tokens.len() {
@@ -186,17 +174,16 @@ fn parse_tokens(tokens: &[Token], mut pos: usize) -> Result<(Vec<ConfigNode>, us
     Ok((nodes, pos))
 }
 
-/// 將解析後的 ConfigNode 樹轉換為 JSON 結構，採用 ConfigManager 提供的模板進行覆蓋。
 fn nodes_to_json(nodes: &[ConfigNode]) -> Value {
     let mut map = Map::new();
     for node in nodes {
-        if let Some(cmd) = crate::core::config::config_manager::get_command(&node.command) {
+        if let Some(cmd) = get_command(&node.command) {
             let mut node_json = if cmd.is_block {
                 ConfigManager::get_block_template(&node.command, false).unwrap_or_else(|| json!({}))
             } else {
                 ConfigManager::get_block_template(&node.command, false).unwrap_or_else(|| json!({}))
             };
-            // 將解析到的參數依序覆蓋預設值
+
             if let Some(Value::Array(arr)) = node_json.get_mut("params") {
                 for (i, arg) in node.args.iter().enumerate() {
                     if let Some(param_obj) = arr.get_mut(i).and_then(|v| v.as_object_mut()) {
@@ -205,7 +192,6 @@ fn nodes_to_json(nodes: &[ConfigNode]) -> Value {
                 }
             }
 
-            // 處理子節點
             if !node.children.is_empty() {
                 let children_json = nodes_to_json(&node.children);
                 node_json
@@ -213,7 +199,7 @@ fn nodes_to_json(nodes: &[ConfigNode]) -> Value {
                     .unwrap()
                     .insert("children".to_string(), children_json);
             }
-            // 將此節點放入結果中：若非唯一則以陣列形式呈現
+
             if cmd.unique {
                 map.insert(node.command.clone(), node_json);
             } else {
@@ -230,111 +216,6 @@ fn nodes_to_json(nodes: &[ConfigNode]) -> Value {
     Value::Object(map)
 }
 
-/// 遞迴處理最終配置 JSON，建立 ConfigContext 樹。  
-/// - 若指令為塊，呼叫 new_empty 建立新塊並呼叫其 handler，再處理 children；  
-/// - 若非塊，則寫入當前上下文並呼叫 handler。
-fn process_final_config(config: &Value, parent_ctx: &mut ConfigContext) -> Result<(), ConfigError> {
-    if let Value::Object(map) = config {
-        for (key, value) in map {
-            if let Some(cmd) = crate::core::config::config_manager::get_command(key) {
-                if cmd.is_block {
-                    if cmd.unique {
-                        if let Value::Object(obj) = value {
-                            let args = extract_args(obj);
-                            let mut child_ctx = ConfigContext::new_empty(key, args);
-                            cmd.handle(&mut child_ctx, value);
-                            if let Some(children) = obj.get("children") {
-                                process_final_config(children, &mut child_ctx)?;
-                            }
-                            parent_ctx.children.push(child_ctx);
-                        } else if let Value::Array(arr) = value {
-                            if arr.len() == 1 {
-                                if let Value::Object(obj) = &arr[0] {
-                                    let args = extract_args(obj);
-                                    let mut child_ctx = ConfigContext::new_empty(key, args);
-                                    cmd.handle(&mut child_ctx, &arr[0]);
-                                    if let Some(children) = obj.get("children") {
-                                        process_final_config(children, &mut child_ctx)?;
-                                    }
-                                    parent_ctx.children.push(child_ctx);
-                                }
-                            } else {
-                                return Err(ConfigError::ValidationError(format!(
-                                    "Unique command {} must have exactly one instance",
-                                    key
-                                )));
-                            }
-                        } else {
-                            return Err(ConfigError::ValidationError(format!(
-                                "Invalid format for unique command: {}",
-                                key
-                            )));
-                        }
-                    } else if let Value::Array(arr) = value {
-                        for item in arr {
-                            if let Value::Object(obj) = item {
-                                let args = extract_args(obj);
-                                let mut child_ctx = ConfigContext::new_empty(key, args);
-                                cmd.handle(&mut child_ctx, item);
-                                if let Some(children) = obj.get("children") {
-                                    process_final_config(children, &mut child_ctx)?;
-                                }
-                                parent_ctx.children.push(child_ctx);
-                            }
-                        }
-                    } else {
-                        return Err(ConfigError::ValidationError(format!(
-                            "Non-unique command {} must be in an array",
-                            key
-                        )));
-                    }
-                } else {
-                    // 非塊指令，直接寫入當前上下文
-                    if let Value::Object(obj) = value {
-                        let args = extract_args(obj);
-                        if args.iter().all(|arg| arg.is_empty()) {
-                            continue;
-                        }
-                        parent_ctx.current_cmd_name = key.clone();
-                        parent_ctx.current_cmd_args = args;
-                        cmd.handle(parent_ctx, value);
-                        if let Some(children) = obj.get("children") {
-                            process_final_config(children, parent_ctx)?;
-                        }
-                    } else if let Value::Array(arr) = value {
-                        if arr.len() == 1 {
-                            if let Value::Object(obj) = &arr[0] {
-                                let args = extract_args(obj);
-                                if args.iter().all(|arg| arg.is_empty()) {
-                                    continue;
-                                }
-                                parent_ctx.current_cmd_name = key.clone();
-                                parent_ctx.current_cmd_args = args;
-                                cmd.handle(parent_ctx, &arr[0]);
-                                if let Some(children) = obj.get("children") {
-                                    process_final_config(children, parent_ctx)?;
-                                }
-                            }
-                        } else {
-                            return Err(ConfigError::ValidationError(format!(
-                                "Non-unique command {} must be in an array with one element",
-                                key
-                            )));
-                        }
-                    }
-                }
-            } else {
-                return Err(ConfigError::ValidationError(format!(
-                    "Unknown command: {}",
-                    key
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// 輔助函式：從物件中讀取 "params" 欄位，並依序取出每個參數的 "value" 作為字串集合
 fn extract_args(obj: &Map<String, Value>) -> Vec<String> {
     if let Some(Value::Array(params)) = obj.get("params") {
         params
@@ -352,22 +233,145 @@ fn extract_args(obj: &Map<String, Value>) -> Vec<String> {
     }
 }
 
-/// 主 API：
-/// - storage_path: 存儲 JSON 配置的檔案路徑  
-/// - config_file: 可選的配置文件（nginx 語法）路徑  
-/// - top_blocks: 頂層塊名稱集合（例如 ["http"]）  
-///
-/// 傳回代表當前配置的 ConfigContext 根節點。
+fn process_block_command(
+    cmd: Arc<Command>,
+    key: &String,
+    value: &Value,
+    parent_ctx: &mut ConfigContext,
+) -> Result<(), ConfigError> {
+    if cmd.unique {
+        match value {
+            Value::Object(obj) => {
+                let args = extract_args(obj);
+                let mut child_ctx = ConfigContext::new_empty(key, args);
+                cmd.handle(&mut child_ctx, value);
+                if let Some(children) = obj.get("children") {
+                    process_final_config(children, &mut child_ctx)?;
+                }
+                parent_ctx.children.push(child_ctx);
+            }
+            Value::Array(arr) => {
+                if arr.len() != 1 {
+                    return Err(ConfigError::ValidationError(format!(
+                        "Unique command {} must have exactly one instance",
+                        key
+                    )));
+                }
+                if let Some(Value::Object(obj)) = arr.first() {
+                    let args = extract_args(obj);
+                    let mut child_ctx = ConfigContext::new_empty(key, args);
+                    cmd.handle(&mut child_ctx, arr.first().unwrap());
+                    if let Some(children) = obj.get("children") {
+                        process_final_config(children, &mut child_ctx)?;
+                    }
+                    parent_ctx.children.push(child_ctx);
+                }
+            }
+            _ => {
+                return Err(ConfigError::ValidationError(format!(
+                    "Invalid format for unique command: {}",
+                    key
+                )));
+            }
+        }
+    } else if let Value::Array(arr) = value {
+        for item in arr {
+            if let Value::Object(obj) = item {
+                let args = extract_args(obj);
+                let mut child_ctx = ConfigContext::new_empty(key, args);
+                cmd.handle(&mut child_ctx, item);
+                if let Some(children) = obj.get("children") {
+                    process_final_config(children, &mut child_ctx)?;
+                }
+                parent_ctx.children.push(child_ctx);
+            }
+        }
+    } else {
+        return Err(ConfigError::ValidationError(format!(
+            "Non-unique command {} must be in an array",
+            key
+        )));
+    }
+    Ok(())
+}
+
+fn process_non_block_command(
+    cmd: Arc<Command>,
+    key: &String,
+    value: &Value,
+    parent_ctx: &mut ConfigContext,
+) -> Result<(), ConfigError> {
+    match value {
+        Value::Object(obj) => {
+            let args = extract_args(obj);
+            if args.iter().all(|arg| arg.is_empty()) {
+                return Ok(()); // Skip commands with no arguments
+            }
+            parent_ctx.current_cmd_name = key.clone();
+            parent_ctx.current_cmd_args = args;
+            cmd.handle(parent_ctx, value);
+            if let Some(children) = obj.get("children") {
+                process_final_config(children, parent_ctx)?;
+            }
+        }
+        Value::Array(arr) => {
+            if arr.len() != 1 {
+                return Err(ConfigError::ValidationError(format!(
+                    "Non-unique command {} must be in an array with one element",
+                    key
+                )));
+            }
+            if let Some(Value::Object(obj)) = arr.first() {
+                let args = extract_args(obj);
+                if args.iter().all(|arg| arg.is_empty()) {
+                    return Ok(()); // Skip commands with no arguments
+                }
+                parent_ctx.current_cmd_name = key.clone();
+                parent_ctx.current_cmd_args = args;
+                cmd.handle(parent_ctx, arr.first().unwrap());
+                if let Some(children) = obj.get("children") {
+                    process_final_config(children, parent_ctx)?;
+                }
+            }
+        }
+        _ => {
+            return Err(ConfigError::ValidationError(format!(
+                "Invalid format for non-block command: {}",
+                key
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn process_final_config(config: &Value, parent_ctx: &mut ConfigContext) -> Result<(), ConfigError> {
+    if let Value::Object(map) = config {
+        for (key, value) in map {
+            if let Some(cmd) = get_command(key) {
+                if cmd.is_block {
+                    process_block_command(cmd, key, value, parent_ctx)?;
+                } else {
+                    process_non_block_command(cmd, key, value, parent_ctx)?;
+                }
+            } else {
+                return Err(ConfigError::ValidationError(format!(
+                    "Unknown command: {}",
+                    key
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn load_config(
     storage_path: &str,
     config_file: Option<&str>,
     top_blocks: Vec<String>,
 ) -> Result<ConfigContext, ConfigError> {
-    // 1. 從 ConfigManager 取得完整模板
     let complete_template =
         ConfigManager::get_complete_template(top_blocks).map_err(ConfigError::ValidationError)?;
 
-    // 2. 若有配置文件則解析；否則嘗試讀取存儲的 JSON
     let file_config = if let Some(path) = config_file {
         Some(parse_nginx_config(path)?)
     } else {
@@ -381,7 +385,6 @@ pub fn load_config(
         None
     };
 
-    // 3. 判斷使用哪一組配置：有配置文件則優先使用；否則使用存儲；若都無，則以空物件表示
     let user_config = if let Some(fc) = file_config {
         fc
     } else if let Some(sc) = stored_config {
@@ -390,13 +393,10 @@ pub fn load_config(
         json!({})
     };
 
-    // 4. 以模板為基礎，合併使用者配置
     let final_config = merge_config(&complete_template, &user_config);
 
-    // 5. 將最終配置寫回存儲（持久化）
     fs::write(storage_path, serde_json::to_string_pretty(&final_config)?)?;
 
-    // 6. 依據最終配置處理並建立 ConfigContext 樹
     let mut root_ctx = ConfigContext::new_empty("root", vec![]);
     process_final_config(&final_config, &mut root_ctx)?;
 
