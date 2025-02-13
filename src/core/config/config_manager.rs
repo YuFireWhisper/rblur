@@ -97,11 +97,14 @@ pub struct ConfigManager;
 
 impl ConfigManager {
     pub fn get_complete_template(top_blocks: Vec<String>) -> Result<Value, String> {
-        let reg = get_registry();
+        let registry_data: HashMap<String, Arc<Command>> = {
+            let reg = get_registry();
+            reg.clone()
+        };
         let mut map = serde_json::Map::new();
 
         for block in top_blocks {
-            let cmd = reg
+            let cmd = registry_data
                 .get(&block)
                 .ok_or_else(|| format!("Block {} not registered", block))?;
             let template = get_block_json(&block, true)
