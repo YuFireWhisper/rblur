@@ -30,7 +30,7 @@ fn main() {
         let mut cargo_manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         cargo_manifest_dir.push("config");
         cargo_manifest_dir.push("default");
-        Some(cargo_manifest_dir.into_os_string().into_string().unwrap()) //轉成String
+        Some(cargo_manifest_dir.into_os_string().into_string().unwrap())
     } else {
         args.config_path
     };
