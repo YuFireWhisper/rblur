@@ -117,8 +117,6 @@ pub fn handle_create_server(
     ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpServerContext>());
 }
 
-/// **handle_set_listen**
-/// 設定伺服器監聽位址，需提供一個參數：監聽位址 (String)
 pub fn handle_set_listen(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -133,8 +131,6 @@ pub fn handle_set_listen(
     }
 }
 
-/// **handle_set_server_name**
-/// 登錄伺服器名稱，需提供一個參數：名稱 (String)
 pub fn handle_set_server_name(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -149,8 +145,6 @@ pub fn handle_set_server_name(
     }
 }
 
-/// **handle_web_config**
-/// 設定伺服器的 web_config，需提供一個參數：啟用標記 (bool，以 "true" 或 "false" 表示)
 pub fn handle_web_config(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -172,7 +166,6 @@ pub fn handle_web_config(
     }
 }
 
-/// HttpServerContext 保存伺服器配置，包括監聽位址、伺服器名稱與 processor
 #[derive(Default)]
 pub struct HttpServerContext {
     listen: Mutex<String>,
@@ -214,7 +207,6 @@ impl HttpServerContext {
     }
 }
 
-/// 代表最終運行的 HTTP 伺服器，持有 Processor 處理請求
 pub struct HttpServer {
     listener: TcpListener,
     http_version: Arc<Version>,
@@ -224,12 +216,7 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    /// 根據配置建立 HttpServer，主要步驟：
-    /// 1. 從 ConfigContext 中取得 HttpServerContext
-    /// 2. 遍歷所有子區塊（例如 location），從中提取各路由的處理器，登錄到 processor 中
-    /// 3. 將 processor 從 HttpServerContext 中取出，並建立 Server
     pub fn new(server_config: &ConfigContext) -> Self {
-        // 取得 server 區塊的 HttpServerContext
         let server_arc: Arc<HttpServerContext> = if let Some(ptr) = &server_config.current_ctx {
             let srv_raw = ptr.load(Ordering::SeqCst);
             unsafe { Arc::from_raw(srv_raw as *const HttpServerContext) }
@@ -244,11 +231,9 @@ impl HttpServer {
 
         let mut ssl_config: Option<Arc<ServerConfig>> = None;
 
-        // 處理所有子區塊
         for child in &server_config.children {
             match child.block_name.trim() {
                 "location" => {
-                    // location 區塊第一個參數即為路徑
                     let path = child
                         .block_args
                         .first()
@@ -423,7 +408,6 @@ fn process_tls_connection(
     handle_connection(&mut tls_stream, processor, http_version)
 }
 
-/// 處理單一連線：讀取請求，透過 processor 產生回應
 fn handle_connection<S: Read + Write>(
     stream: &mut S,
     processor: &HttpProcessor,
@@ -436,7 +420,6 @@ fn handle_connection<S: Read + Write>(
     }
     let request_bytes = buffer[..n].to_vec();
 
-    // 呼叫 processor 處理請求
     let response_bytes = match processor.process(request_bytes) {
         Ok(resp) => resp,
         Err(_) => HttpProcessor::create_404_response(http_version).as_bytes(),
