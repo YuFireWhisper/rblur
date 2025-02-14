@@ -106,60 +106,53 @@ register_commands!(
         .build(handle_web_config)
 );
 
-pub fn handle_create_server(
-    ctx: &mut crate::core::config::config_context::ConfigContext,
-    _config: &Value,
-) {
-    println!("Creating server block");
+fn clone_arc_from_atomic_ptr<T>(atomic_ptr: &AtomicPtr<u8>) -> Option<Arc<T>> {
+    let raw = atomic_ptr.load(Ordering::SeqCst) as *const T;
+    if raw.is_null() {
+        None
+    } else {
+        unsafe {
+            Arc::increment_strong_count(raw);
+            Some(Arc::from_raw(raw))
+        }
+    }
+}
+
+pub fn handle_create_server(ctx: &mut ConfigContext, _config: &Value) {
     let server_ctx = Arc::new(HttpServerContext::new());
-    let server_raw = Arc::into_raw(server_ctx.clone()) as *mut u8;
-    ctx.current_ctx = Some(AtomicPtr::new(server_raw));
+    let raw_ptr = Arc::into_raw(server_ctx.clone()) as *mut u8;
+    ctx.current_ctx = Some(AtomicPtr::new(raw_ptr));
     ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpServerContext>());
 }
 
-pub fn handle_set_listen(
-    ctx: &mut crate::core::config::config_context::ConfigContext,
-    config: &Value,
-) {
+pub fn handle_set_listen(ctx: &mut ConfigContext, config: &Value) {
     let listen = get_config_param(config, 0).expect("Missing listen parameter");
-    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
-        if !srv_ptr.is_null() {
-            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.set_listen(&listen);
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(server_ctx) = clone_arc_from_atomic_ptr::<HttpServerContext>(ctx_ptr) {
+            server_ctx.set_listen(&listen);
         }
     }
 }
 
-pub fn handle_set_server_name(
-    ctx: &mut crate::core::config::config_context::ConfigContext,
-    config: &Value,
-) {
+pub fn handle_set_server_name(ctx: &mut ConfigContext, config: &Value) {
     let server_name = get_config_param(config, 0).expect("Missing server_name parameter");
-    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
-        if !srv_ptr.is_null() {
-            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.add_server_name(&server_name);
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(server_ctx) = clone_arc_from_atomic_ptr::<HttpServerContext>(ctx_ptr) {
+            server_ctx.add_server_name(&server_name);
         }
     }
 }
 
-pub fn handle_web_config(
-    ctx: &mut crate::core::config::config_context::ConfigContext,
-    config: &Value,
-) {
+pub fn handle_web_config(ctx: &mut ConfigContext, config: &Value) {
     let flag = get_config_param(config, 0).expect("Missing web_config parameter");
     if !bool_str_to_bool(&flag).expect("Invalid web_config value") {
         return;
     }
-    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(std::sync::atomic::Ordering::SeqCst);
-        if !srv_ptr.is_null() {
-            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(server_ctx) = clone_arc_from_atomic_ptr::<HttpServerContext>(ctx_ptr) {
             let storage_path = get_default_storage_path();
             let web_config = WebConfig::new(&storage_path).expect("Failed to create web config");
-            if let Ok(mut web_config_lock) = srv_ctx.web_config.lock() {
+            if let Ok(mut web_config_lock) = server_ctx.web_config.lock() {
                 *web_config_lock = Some(Arc::new(web_config));
             }
         }
@@ -172,7 +165,7 @@ pub struct HttpServerContext {
     server_names: Mutex<Vec<String>>,
     http_version: Mutex<Version>,
     processor: Mutex<HttpProcessor>,
-    web_config: Mutex<Option<Arc<WebConfig>>>,
+    pub web_config: Mutex<Option<Arc<WebConfig>>>,
 }
 
 impl HttpServerContext {
@@ -217,14 +210,18 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub fn new(server_config: &ConfigContext) -> Self {
-        let server_arc: Arc<HttpServerContext> = if let Some(ptr) = &server_config.current_ctx {
-            let srv_raw = ptr.load(Ordering::SeqCst);
-            unsafe { Arc::from_raw(srv_raw as *const HttpServerContext) }
+        let server_ctx_arc: Arc<HttpServerContext> = if let Some(ptr) = &server_config.current_ctx {
+            let raw = ptr.load(Ordering::SeqCst);
+            unsafe {
+                Arc::increment_strong_count(raw as *const HttpServerContext);
+                Arc::from_raw(raw as *const HttpServerContext)
+            }
         } else {
             panic!("Server block missing HttpServerContext");
         };
-        let server_ctx = server_arc.clone();
-        std::mem::forget(server_arc);
+
+        let server_ctx = server_ctx_arc.clone();
+        std::mem::forget(server_ctx_arc);
 
         let listen = server_ctx.listen();
         println!("Listening on: {}", listen);
@@ -240,21 +237,20 @@ impl HttpServer {
                         .expect("location block must have a path")
                         .clone();
                     if let Some(ptr) = &child.current_ctx {
-                        let loc_raw = ptr.load(Ordering::SeqCst);
-                        let loc_arc: Arc<HttpLocationContext> =
-                            unsafe { Arc::from_raw(loc_raw as *const HttpLocationContext) };
-                        let handlers = loc_arc.take_handlers();
-                        for (code, handler) in handlers {
-                            if let Ok(mut proc_lock) = server_ctx.processor.lock() {
-                                proc_lock.add_handler(
-                                    path.clone(),
-                                    StatusCode::from_u16(code).unwrap(),
-                                    &Method::OPTIONS,
-                                    handler,
-                                );
+                        if let Some(loc_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ptr)
+                        {
+                            let handlers = loc_ctx.take_handlers();
+                            for (code, handler) in handlers {
+                                if let Ok(mut proc_lock) = server_ctx.processor.lock() {
+                                    proc_lock.add_handler(
+                                        path.clone(),
+                                        StatusCode::from_u16(code).unwrap(),
+                                        &Method::OPTIONS,
+                                        handler,
+                                    );
+                                }
                             }
                         }
-                        std::mem::forget(loc_arc);
                     }
                 }
                 "ssl" => {
@@ -300,8 +296,6 @@ impl HttpServer {
 
         let listener = TcpListener::bind(&listen).unwrap();
         let http_version = Arc::new(server_ctx.get_http_version());
-
-        println!("SSL enabled: {}", ssl_config.is_some());
 
         Self {
             listener,
@@ -367,16 +361,14 @@ fn process_connection(
     http_version: Arc<Version>,
     ssl_config: Option<Arc<ServerConfig>>,
 ) {
-    println!("Processing connection");
     if let Ok(pool) = THREAD_POOL.lock() {
-        println!("Processing connection in thread pool");
         let _ = pool.spawn(move || {
-            println!("Handling connection");
-            if let Err(e) = if let Some(ssl_cfg) = ssl_config {
+            let result = if let Some(ssl_cfg) = ssl_config {
                 process_tls_connection(stream, ssl_cfg, &processor, &http_version)
             } else {
                 process_plain_connection(stream, &processor, &http_version)
-            } {
+            };
+            if let Err(e) = result {
                 eprintln!("Error handling connection: {}", e);
             }
         });
@@ -399,7 +391,6 @@ fn process_tls_connection(
     processor: &HttpProcessor,
     http_version: &Version,
 ) -> std::io::Result<()> {
-    println!("Processing TLS connection");
     let mut conn = ServerConnection::new(ssl_cfg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
