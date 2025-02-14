@@ -1,7 +1,6 @@
 use http::{StatusCode, Version};
 use reqwest::blocking::Client;
 use serde_json::Value;
-
 use std::{
     collections::HashMap,
     sync::{
@@ -93,16 +92,32 @@ register_commands!(
         .build(handle_port_forward)
 );
 
+/// Helper function to safely clone an Arc from an AtomicPtr.
+/// Increments the strong count to produce a new Arc reference.
+fn clone_arc_from_atomic_ptr<T>(atomic_ptr: &AtomicPtr<u8>) -> Option<Arc<T>> {
+    let raw = atomic_ptr.load(Ordering::SeqCst) as *const T;
+    if raw.is_null() {
+        None
+    } else {
+        unsafe {
+            Arc::increment_strong_count(raw);
+            Some(Arc::from_raw(raw))
+        }
+    }
+}
+
+/// Creates a new HttpLocationContext and stores it in the config context.
 pub fn handle_create_location(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     _config: &Value,
 ) {
     let location_ctx = Arc::new(HttpLocationContext::new());
-    let location_raw = Arc::into_raw(location_ctx.clone()) as *mut u8;
-    ctx.current_ctx = Some(AtomicPtr::new(location_raw));
+    let raw_ptr = Arc::into_raw(location_ctx.clone()) as *mut u8;
+    ctx.current_ctx = Some(AtomicPtr::new(raw_ptr));
     ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpLocationContext>());
 }
 
+/// Configures serving a static file by reading its content and setting up a handler.
 pub fn handle_set_static_file(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -112,24 +127,27 @@ pub fn handle_set_static_file(
         return;
     }
     println!("Setting static file path: {}", file_path);
-    if let Some(loc_ctx_ptr) = &ctx.current_ctx {
-        let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
-        let content =
-            Arc::new(std::fs::read_to_string(&file_path).expect("Failed to read static file"));
-        let content_type = get_content_type(&file_path).to_string();
-        let handler = Box::new(move |_req: &HttpRequest| {
-            println!("Serving static file: {}", file_path);
-            let mut resp = HttpResponse::new();
-            resp.set_status_line(Version::HTTP_11, StatusCode::OK);
-            resp.set_header("Content-Type", &content_type);
-            resp.set_body(&content);
-            resp
-        });
-        let loc_ctx = unsafe { &mut *(loc_ptr as *mut HttpLocationContext) };
-        loc_ctx.set_handler(200, handler);
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(location_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ctx_ptr) {
+            let content = Arc::new(
+                std::fs::read_to_string(&file_path)
+                    .expect("Failed to read static file"),
+            );
+            let content_type = get_content_type(&file_path).to_string();
+            let handler = Box::new(move |_req: &HttpRequest| {
+                println!("Serving static file: {}", file_path);
+                let mut resp = HttpResponse::new();
+                resp.set_status_line(Version::HTTP_11, StatusCode::OK);
+                resp.set_header("Content-Type", &content_type);
+                resp.set_body(&content);
+                resp
+            });
+            location_ctx.set_handler(200, handler);
+        }
     }
 }
 
+/// Configures port forwarding by setting a handler that forwards requests to another server.
 pub fn handle_port_forward(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -140,36 +158,36 @@ pub fn handle_port_forward(
     }
 
     println!("Setting port forward address: {}", forward_addr);
-    if let Some(loc_ctx_ptr) = &ctx.current_ctx {
-        let loc_ptr = loc_ctx_ptr.load(Ordering::SeqCst);
-        let forward_addr = forward_addr.to_string();
-        let handler = Box::new(move |req: &HttpRequest| {
-            let client = Client::new();
-            let url = format!("{}{}", forward_addr, req.path());
-            println!("Forwarding request to: {}", url);
-            let result = client.get(&url).send();
-            match result {
-                Ok(response) => {
-                    let status = StatusCode::from_u16(response.status().as_u16())
-                        .expect("Invalid status code");
-                    let body = response
-                        .text()
-                        .unwrap_or_else(|_| "Error reading forwarded response".into());
-                    let mut resp = HttpResponse::new();
-                    resp.set_status_line(Version::HTTP_11, status);
-                    resp.set_body(&body);
-                    resp
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(location_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ctx_ptr) {
+            let forward_addr = forward_addr.to_string();
+            let handler = Box::new(move |req: &HttpRequest| {
+                let client = Client::new();
+                let url = format!("{}{}", forward_addr, req.path());
+                println!("Forwarding request to: {}", url);
+                let result = client.get(&url).send();
+                match result {
+                    Ok(response) => {
+                        let status = StatusCode::from_u16(response.status().as_u16())
+                            .expect("Invalid status code");
+                        let body = response
+                            .text()
+                            .unwrap_or_else(|_| "Error reading forwarded response".into());
+                        let mut resp = HttpResponse::new();
+                        resp.set_status_line(Version::HTTP_11, status);
+                        resp.set_body(&body);
+                        resp
+                    }
+                    Err(_) => {
+                        let mut resp = HttpResponse::new();
+                        resp.set_status_line(Version::HTTP_11, StatusCode::BAD_GATEWAY);
+                        resp.set_body("Bad Gateway");
+                        resp
+                    }
                 }
-                Err(_) => {
-                    let mut resp = HttpResponse::new();
-                    resp.set_status_line(Version::HTTP_11, StatusCode::BAD_GATEWAY);
-                    resp.set_body("Bad Gateway");
-                    resp
-                }
-            }
-        });
-        let loc_ctx = unsafe { &mut *(loc_ptr as *mut HttpLocationContext) };
-        loc_ctx.set_handler(200, handler);
+            });
+            location_ctx.set_handler(200, handler);
+        }
     }
 }
 
@@ -185,12 +203,14 @@ impl HttpLocationContext {
         Self::default()
     }
 
+    /// Sets a handler for a specific status code.
     pub fn set_handler(&self, code: u16, handler: HttpHandlerFunction) {
         if let Ok(mut handlers) = self.handlers.lock() {
             handlers.insert(code, handler);
         }
     }
 
+    /// Extracts and clears all handlers.
     pub fn take_handlers(&self) -> HashMap<u16, HttpHandlerFunction> {
         let mut map = HashMap::new();
         if let Ok(mut handlers) = self.handlers.lock() {
@@ -199,3 +219,4 @@ impl HttpLocationContext {
         map
     }
 }
+
