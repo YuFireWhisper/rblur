@@ -173,8 +173,6 @@ pub fn handle_port_forward(
     }
 }
 
-/// 此區塊僅用於配置階段保存各路由的處理器，待 Server 建立時轉登 Processor
-/// 注意：此結構在運行時不再直接被使用，只在配置中暫存 handler 資訊
 pub type HttpHandlerFunction = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync + 'static>;
 
 #[derive(Default, Clone)]

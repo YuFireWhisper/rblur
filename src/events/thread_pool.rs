@@ -81,7 +81,6 @@ impl ThreadPool {
         let task_count = queue.len();
         drop(queue);
 
-        // 清除已失效的 worker，以取得真正的活動 worker 數量
         let mut workers_guard = self.workers.lock().unwrap();
         workers_guard.retain(|w| w.thread.is_some());
         let active_count = workers_guard.len();

@@ -1,14 +1,7 @@
 use crate::core::config::config_context::ConfigContext;
 use serde_json::Value;
-use std::collections::HashMap; // 假設 ConfigContext 定義在此模組中
+use std::collections::HashMap;
 
-/// 參數定義：
-/// - index：從 0 開始，表示參數順序
-/// - display_name：多國語言顯示名稱（例如 {"en": "IP Address", "zh-tw": "IP 位址"}）
-/// - type_name：參數型別（例如 "String", "bool", "u16"）
-/// - is_required：是否必須
-/// - default：預設值（統一以字串儲存）
-/// - desc：多國語言說明
 #[derive(Debug, Clone)]
 pub struct Parameter {
     pub index: usize,
@@ -61,7 +54,6 @@ impl ParameterBuilder {
     }
 
     pub fn display_name(mut self, lang: &str, name: &str) -> Self {
-        // 插入一個元素到 HashMap
         self.display_name.insert(lang.to_string(), name.to_string());
         self
     }
@@ -100,15 +92,6 @@ impl ParameterBuilder {
 
 type CommandHandler = Box<dyn Fn(&mut ConfigContext, &Value) + Send + Sync>;
 
-/// 指令結構：
-/// - name：配置文件中使用的指令名稱（例如 "listen"）
-/// - is_block：是否為塊指令（例如 http、server、location、ssl 等）
-/// - unique：若為塊指令，是否在同一區域內只允許出現一次
-/// - allowed_parents：允許出現的上層塊（例如 "server" 指令只允許在 "http" 下出現）
-/// - display_name：前端顯示的多國語言名稱
-/// - desc：前端顯示的多國語言說明
-/// - params：此指令的參數定義（可為空）
-/// - handler：當該指令被解析時呼叫的處理函數，傳入當前 ConfigContext 與該指令的 JSON 配置（包含參數與子塊）
 pub struct Command {
     pub name: String,
     pub is_block: bool,
@@ -121,7 +104,6 @@ pub struct Command {
 }
 
 impl Command {
-    /// 呼叫此指令的處理函數，傳入當前上下文與對應的 JSON 設定
     pub fn handle(&self, ctx: &mut ConfigContext, config: &Value) {
         (self.handler)(ctx, config);
     }
