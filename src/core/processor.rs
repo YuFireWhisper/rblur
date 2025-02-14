@@ -363,6 +363,13 @@ impl Processor for HttpProcessor {
             println!("Response: {}", response.status_line);
             println!("Header: {}", response.header);
             return Ok(response.as_bytes());
+        } 
+
+        if let Some(handler) = self.find_handler(&clean_path, &Method::OPTIONS) {
+            let response = handler(&req);
+            println!("Response: {}", response.status_line);
+            println!("Header: {}", response.header);
+            return Ok(response.as_bytes());
         }
 
         if *method == Method::OPTIONS {

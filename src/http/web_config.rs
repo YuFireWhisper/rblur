@@ -193,7 +193,6 @@ impl WebConfig {
                     )
                 })
             } else {
-                // Should not reach here if contains_key is true, but for safety
                 Err(WebConfigError::ValidationError(
                     "Unexpected error accessing 'children' field".into(),
                 ))
@@ -203,7 +202,6 @@ impl WebConfig {
                 "children".to_string(),
                 Value::Object(serde_json::Map::new()),
             );
-            // After inserting, we can safely get a mutable reference
             parent_obj
                 .get_mut("children")
                 .and_then(|v| v.as_object_mut())
@@ -223,7 +221,6 @@ impl WebConfig {
     ) -> Result<(), WebConfigError> {
         if let Some(existing) = children_entry.get_mut(block_name) {
             if let Some(arr) = existing.as_array_mut() {
-                // Use as_array_mut() instead of Value::Array
                 arr.push(template);
             } else {
                 return Err(WebConfigError::ValidationError(format!(
@@ -344,7 +341,7 @@ impl WebConfig {
         self.validate_block_uniqueness_deletion(&template, block_name)?;
 
         if arr.len() == 1 {
-            *arr = vec![template]; // Reset to template if it's the last one, based on original logic.
+            *arr = vec![template];
         } else {
             arr.remove(index);
         }
@@ -454,11 +451,7 @@ pub fn add_all_web_config_handlers(
     let project_root = env!("CARGO_MANIFEST_DIR");
     let static_path = format!("{}/static/dist/", project_root);
     proc_lock
-        .serve_static(&static_path)
-        .expect("Failed to register static directory mapping");
-    let index_file_path = format!("{}/static/dist/index.html", project_root);
-    proc_lock
-        .serve_file_at("/web_config", &index_file_path)
+        .serve_static_at("/web_config", &static_path)
         .expect("Failed to register /web_config mapping");
 
     register_get_json_handler(&web_config, &mut proc_lock);
@@ -649,63 +642,79 @@ fn register_delete_block_handler(
 fn ensure_static_up_to_date() -> Result<PathBuf, WebConfigError> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let repo_dir = PathBuf::from(manifest_dir).join("static");
-    let need_update = needs_update(&repo_dir)?;
-    if need_update {
-        if repo_dir.exists() {
-            fs::remove_dir_all(&repo_dir)?;
+    let dist_dir = repo_dir.join("dist");
+
+    if needs_update(&repo_dir)? {
+        if !repo_dir.exists() {
+            let status = Command::new("git")
+                .args(["clone", FRONTEND_REPO_URL, repo_dir.to_str().unwrap()])
+                .status()
+                .map_err(|e| {
+                    WebConfigError::ValidationError(format!("Failed to clone repository: {}", e))
+                })?;
+            if !status.success() {
+                return Err(WebConfigError::ValidationError("Git clone failed".into()));
+            }
+        } else {
+            let status = Command::new("git")
+                .args(["pull"])
+                .current_dir(&repo_dir)
+                .status()
+                .map_err(|e| {
+                    WebConfigError::ValidationError(format!("Failed to run git pull: {}", e))
+                })?;
+
+            if !status.success() {
+                return Err(WebConfigError::ValidationError("Git pull failed".into()));
+            }
         }
-        let status = Command::new("git")
-            .args(["clone", FRONTEND_REPO_URL, repo_dir.to_str().unwrap()])
+
+        let install_status = Command::new("npm")
+            .arg("install")
+            .current_dir(&repo_dir)
             .status()
             .map_err(|e| {
-                WebConfigError::ValidationError(format!("Failed to clone repository: {}", e))
+                WebConfigError::ValidationError(format!("Failed to run npm install: {}", e))
             })?;
-        if !status.success() {
-            return Err(WebConfigError::ValidationError("Git clone failed".into()));
+        if !install_status.success() {
+            return Err(WebConfigError::ValidationError("npm install failed".into()));
+        }
+
+        let build_status = Command::new("npm")
+            .arg("run")
+            .arg("build")
+            .current_dir(&repo_dir)
+            .status()
+            .map_err(|e| {
+                WebConfigError::ValidationError(format!("Failed to run npm run build: {}", e))
+            })?;
+        if !build_status.success() {
+            return Err(WebConfigError::ValidationError(
+                "npm run build failed".into(),
+            ));
+        }
+
+        if !dist_dir.exists() {
+            return Err(WebConfigError::ValidationError(
+                "Build did not produce dist directory".into(),
+            ));
         }
     }
-    let _ = Command::new("git")
-        .args(["pull"])
-        .current_dir(&repo_dir)
-        .status()
-        .map_err(|e| WebConfigError::ValidationError(format!("Failed to run git pull: {}", e)))?;
-    let install_status = Command::new("npm")
-        .arg("install")
-        .current_dir(&repo_dir)
-        .status()
-        .map_err(|e| {
-            WebConfigError::ValidationError(format!("Failed to run npm install: {}", e))
-        })?;
-    if !install_status.success() {
-        return Err(WebConfigError::ValidationError("npm install failed".into()));
-    }
-    let build_status = Command::new("npm")
-        .arg("run")
-        .arg("build")
-        .current_dir(&repo_dir)
-        .status()
-        .map_err(|e| {
-            WebConfigError::ValidationError(format!("Failed to run npm run build: {}", e))
-        })?;
-    if !build_status.success() {
-        return Err(WebConfigError::ValidationError(
-            "npm run build failed".into(),
-        ));
-    }
-    let dist_dir = repo_dir.join("dist");
-    if !dist_dir.exists() {
-        return Err(WebConfigError::ValidationError(
-            "Build did not produce dist directory".into(),
-        ));
-    }
+
     Ok(dist_dir)
 }
 
 fn needs_update(static_dir: &Path) -> Result<bool, WebConfigError> {
-    if !static_dir.join("dist/index.html").exists() || !static_dir.join(".git").exists() {
-        println!("Static files not found, need update");
+    if !static_dir.exists() || !static_dir.join(".git").exists() {
+        println!("Static files or .git directory not found, need update");
         return Ok(true);
     }
+
+    if !static_dir.join("dist/index.html").exists() {
+        println!("dist/index.html not found, need update (likely initial clone)");
+        return Ok(true);
+    }
+
     println!("Static files found, checking git status");
     let get_git_hash = |args: &[&str]| {
         Command::new("git")
@@ -723,5 +732,11 @@ fn needs_update(static_dir: &Path) -> Result<bool, WebConfigError> {
     };
     let head = get_git_hash(&["rev-parse", "HEAD"]);
     let upstream = get_git_hash(&["rev-parse", "@{u}"]);
-    Ok(head.is_empty() || upstream.is_empty() || head != upstream)
+
+    if head.is_empty() || upstream.is_empty() {
+        println!("Git commands failed (possibly no upstream), forcing update.");
+        return Ok(true);
+    }
+
+    Ok(head != upstream)
 }
