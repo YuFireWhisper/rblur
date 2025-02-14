@@ -112,7 +112,7 @@ impl HttpProcessor {
         let p = path.as_ref();
         let config = StaticFileConfig::new(p)
             .with_prefix(prefix)
-            .with_strip_prefix(p);
+            .with_strip_prefix(p); // Keep strip_prefix for correct path calculation
         self.serve_static_with_config(config)
     }
 
@@ -171,37 +171,36 @@ impl HttpProcessor {
         prefix: Option<&str>,
         strip_prefix: Option<&Path>,
     ) -> String {
+        let mut url_path = String::new();
+
         if let Some(prefix) = prefix {
-            let file_name = file_path.file_name().unwrap_or_default().to_string_lossy();
-            if file_name == "index.html" {
-                let mut p = prefix.to_string();
-                if !p.starts_with('/') {
-                    p.insert(0, '/');
-                }
-                return p.trim_end_matches('/').to_string();
-            } else {
-                let mut p = prefix.to_string();
-                if p.ends_with('/') {
-                    p.push_str(&file_name);
-                } else {
-                    p.push('/');
-                    p.push_str(&file_name);
-                }
-                return p;
-            }
-        } else if let Some(strip_prefix) = strip_prefix {
-            if let Ok(rel) = file_path.strip_prefix(strip_prefix) {
-                let rel_str = rel.to_string_lossy().replace("\\", "/");
-                if rel_str == "index.html" {
-                    return "/".to_string();
-                } else {
-                    return format!("/{}", rel_str);
-                }
-            } else {
-                return format!("/{}", file_path.to_string_lossy().replace("\\", "/"));
-            }
+            url_path.push_str(prefix);
         }
-        format!("/{}", file_path.to_string_lossy().replace("\\", "/"))
+
+        if let Some(strip_prefix) = strip_prefix {
+            if let Ok(relative_path) = file_path.strip_prefix(strip_prefix) {
+                let relative_path_str = relative_path.to_string_lossy().replace("\\", "/");
+                if !url_path.ends_with('/') && !relative_path_str.is_empty() {
+                    url_path.push('/');
+                }
+                url_path.push_str(&relative_path_str);
+            }
+        } else {
+            let file_name = file_path.file_name().unwrap_or_default().to_string_lossy();
+            if !url_path.ends_with('/') && !file_name.is_empty() {
+                url_path.push('/');
+            }
+            url_path.push_str(&file_name);
+        }
+
+        if url_path.ends_with("index.html") {
+            url_path = url_path.replace("index.html", "");
+        }
+        if url_path.is_empty() || !url_path.starts_with("/") {
+            url_path.insert(0, '/');
+        }
+
+        url_path
     }
 
     fn register_static_handler(
@@ -227,7 +226,7 @@ impl HttpProcessor {
         strip_prefix: Option<&Path>,
     ) -> Result<(), ProcessorError> {
         if self.excluded_files.contains(&file_path.to_path_buf()) {
-            return Ok(()); // Skip excluded files
+            return Ok(());
         }
         let content = Self::read_file_content(file_path)?;
         let content_type = get_content_type(&file_path.to_string_lossy()).to_string();
@@ -307,6 +306,18 @@ impl HttpProcessor {
         let mut matched_handler = None;
         let mut longest_match = 0;
 
+        for ((key, _, key_method), handler) in &self.handlers {
+            if key_method != method {
+                continue;
+            }
+            if key.contains("*") {
+                continue;
+            }
+            if key == path {
+                return Some(handler);
+            }
+        }
+
         for ((pattern, _, pattern_method), handler) in &self.handlers {
             if method != *pattern_method {
                 continue;
@@ -350,25 +361,9 @@ impl Processor for HttpProcessor {
 
         let clean_path = req.path().split('?').next().unwrap().to_owned();
         let method = req.method();
-        println!("Request: {} {}", method, clean_path);
-
-        self.handlers
-            .iter()
-            .for_each(|((path, status, method), _)| {
-                println!("Handler: {} {} {}", method, status, path);
-            });
 
         if let Some(handler) = self.find_handler(&clean_path, method) {
             let response = handler(&req);
-            println!("Response: {}", response.status_line);
-            println!("Header: {}", response.header);
-            return Ok(response.as_bytes());
-        } 
-
-        if let Some(handler) = self.find_handler(&clean_path, &Method::OPTIONS) {
-            let response = handler(&req);
-            println!("Response: {}", response.status_line);
-            println!("Header: {}", response.header);
             return Ok(response.as_bytes());
         }
 
@@ -380,6 +375,7 @@ impl Processor for HttpProcessor {
             return Ok(response.as_bytes());
         }
 
+        println!("Handler: {} 404 Not Found", method);
         Ok(Self::create_404_response(req.version()).as_bytes())
     }
 }
