@@ -183,8 +183,25 @@ register_commands!(
             .desc("en", "Language code for presenting DNS setup instructions")
             .desc("zh-tw", "用於呈現 DNS 設定說明的語言代碼")
             .build()])
-        .build(handler_set_ssl_dns_instructions_lang),
+        .build(handle_set_ssl_dns_instructions_lang),
 );
+
+fn update_ssl_context<F>(ctx: &mut ConfigContext, update_fn: F)
+where
+    F: FnOnce(&mut HttpSSLContext),
+{
+    if let Some(ssl_ctx) = get_mut_ssl_ctx(ctx) {
+        update_fn(ssl_ctx);
+    }
+}
+
+fn get_mut_ssl_ctx(ctx: &ConfigContext) -> Option<&mut HttpSSLContext> {
+    if let Some(ssl_ctx_ptr) = &ctx.current_ctx {
+        let ssl_ptr = ssl_ctx_ptr.load(Ordering::SeqCst);
+        return Some(unsafe { &mut *(ssl_ptr as *mut HttpSSLContext) });
+    }
+    None
+}
 
 pub fn handle_create_ssl(
     ctx: &mut crate::core::config::config_context::ConfigContext,
@@ -207,9 +224,9 @@ pub fn handle_set_ssl_email(
     config: &Value,
 ) {
     let email = get_config_param(config, 0).expect("Missing ssl_email parameter");
-    if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
+    update_ssl_context(ctx, |ssl_ctx| {
         ssl_ctx.email = email.to_string();
-    }
+    });
 }
 
 pub fn handle_set_ssl_domain(
@@ -217,9 +234,9 @@ pub fn handle_set_ssl_domain(
     config: &Value,
 ) {
     let domain = get_config_param(config, 0).expect("Missing ssl_domain parameter");
-    if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
+    update_ssl_context(ctx, |ssl_ctx| {
         ssl_ctx.domain = domain.to_string();
-    }
+    });
 }
 
 pub fn handle_set_ssl_auto_renew(
@@ -231,9 +248,9 @@ pub fn handle_set_ssl_auto_renew(
     if !enable {
         return;
     }
-    if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
+    update_ssl_context(ctx, |ssl_ctx| {
         ssl_ctx.auto_renew = true;
-    }
+    });
 }
 
 pub fn handle_set_ssl_renew_day(
@@ -244,9 +261,9 @@ pub fn handle_set_ssl_renew_day(
     let days = days_str
         .parse::<u32>()
         .expect("Invalid number for ssl_renew_day");
-    if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
+    update_ssl_context(ctx, |ssl_ctx| {
         ssl_ctx.renew_days = days;
-    }
+    });
 }
 
 pub fn handle_set_ssl_dns_provider(
@@ -256,30 +273,20 @@ pub fn handle_set_ssl_dns_provider(
     let provider = get_config_param(config, 0).expect("Missing ssl_dns_provider parameter");
     let api_token =
         get_config_param(config, 1).expect("Missing ssl_dns_provider API token parameter");
-    if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
+    update_ssl_context(ctx, |ssl_ctx| {
         ssl_ctx.dns_provider = DnsProvider::from_str(&provider).unwrap();
         ssl_ctx.dns_provider_api_token = api_token.to_string();
-    }
+    });
 }
 
-pub fn handler_set_ssl_dns_instructions_lang(
+pub fn handle_set_ssl_dns_instructions_lang(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
 ) {
     let lang = get_config_param(config, 0).expect("Missing ssl_dns_instructions_lang parameter");
-    if let Some(ssl_ctx) = get_ssl_ctx(ctx) {
+    update_ssl_context(ctx, |ssl_ctx| {
         ssl_ctx.dns_instructions_lang = lang.to_string();
-    }
-}
-
-fn get_ssl_ctx(
-    ctx: &crate::core::config::config_context::ConfigContext,
-) -> Option<&mut HttpSSLContext> {
-    if let Some(ssl_ctx_ptr) = &ctx.current_ctx {
-        let ssl_ptr = ssl_ctx_ptr.load(Ordering::SeqCst);
-        return Some(unsafe { &mut *(ssl_ptr as *mut HttpSSLContext) });
-    }
-    None
+    });
 }
 
 pub struct HttpSSLContext {
@@ -331,12 +338,7 @@ impl HttpSSL {
             return Err(HttpSSLError::DomainEmpty);
         }
 
-        let mut account = AccountBuilder::new(&ctx.email)
-            .dir_url("https://acme-staging-v02.api.letsencrypt.org/directory")
-            .build()
-            .unwrap();
-
-        println!("Creating account for email: {}", ctx.email);
+        let mut account = AccountBuilder::new(&ctx.email).build().unwrap();
 
         Self::init(&mut account, ctx, false)?;
 
@@ -367,12 +369,12 @@ impl HttpSSL {
     }
 
     fn init(account: &mut Account, ctx: &HttpSSLContext, renew: bool) -> Result<()> {
-        println!("Creating SSL certificate for domain: {}", ctx.domain);
-        let mut order = match renew {
-            true => Order::renew(account, &ctx.domain)?
-                .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?,
-            false => Order::new(account, &ctx.domain)?
-                .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?,
+        let mut order = if renew {
+            Order::renew(account, &ctx.domain)?
+                .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?
+        } else {
+            Order::new(account, &ctx.domain)?
+                .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?
         };
 
         let order = match order.validate_challenge(account) {
