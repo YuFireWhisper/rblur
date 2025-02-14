@@ -2,20 +2,24 @@ use std::thread;
 use std::time::Duration;
 
 use blur::http::http_server::get_default_storage_path;
-use blur::{
-    core::config::config_loader,
-    http::http_manager::HttpManager,
-};
+use blur::{core::config::config_loader, http::http_manager::HttpManager};
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, value_name = "FILE")]
+    config_path: Option<String>,
+}
 
 fn main() {
-    let config_path = Some("/home/yuwhisper/projects/blur/config/config_template");
-    let storage_path = get_default_storage_path();
+    let args = Args::parse();
 
-    println!("Storage path: {:?}", storage_path);
+    let storage_path = get_default_storage_path();
 
     let root_ctx = config_loader::load_config(
         storage_path.to_str().unwrap(),
-        config_path,
+        args.config_path.as_deref(), // Convert Option<String> to Option<&str>
         vec!["http".to_string()],
     )
     .unwrap();
