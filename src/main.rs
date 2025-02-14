@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use blur::http::http_server::get_default_storage_path;
-use blur::{core::config::config_loader, http::http_manager::HttpManager};
 use clap::Parser;
+use rblur::http::http_server::get_default_storage_path;
+use rblur::{core::config::config_loader, http::http_manager::HttpManager};
 use std::env;
 
 #[derive(Parser, Debug)]
@@ -37,7 +37,7 @@ fn main() {
 
     let root_ctx = match config_loader::load_config(
         storage_path.to_str().unwrap(),
-        config_path.as_deref(), 
+        config_path.as_deref(),
         vec!["http".to_string()],
     ) {
         Ok(ctx) => ctx,

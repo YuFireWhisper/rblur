@@ -1,13 +1,13 @@
 [package]
-name = "blur"
+name = "rblur"
 version = "0.1.0"
 edition = "2021"
 description = "一個支援網頁配置介面的輕量級網頁伺服器"
 license = "MIT"
-repository = "https://github.com/YuFireWhisper/blur.git"
+repository = "https://github.com/YuFireWhisper/rblur.git"
 
 [[bin]]
-name = "blur"
+name = "rblur"
 path = "src/main.rs"
 
 [dependencies]
