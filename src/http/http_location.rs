@@ -92,8 +92,6 @@ register_commands!(
         .build(handle_port_forward)
 );
 
-/// Helper function to safely clone an Arc from an AtomicPtr.
-/// Increments the strong count to produce a new Arc reference.
 fn clone_arc_from_atomic_ptr<T>(atomic_ptr: &AtomicPtr<u8>) -> Option<Arc<T>> {
     let raw = atomic_ptr.load(Ordering::SeqCst) as *const T;
     if raw.is_null() {
@@ -106,7 +104,6 @@ fn clone_arc_from_atomic_ptr<T>(atomic_ptr: &AtomicPtr<u8>) -> Option<Arc<T>> {
     }
 }
 
-/// Creates a new HttpLocationContext and stores it in the config context.
 pub fn handle_create_location(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     _config: &Value,
@@ -117,7 +114,6 @@ pub fn handle_create_location(
     ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpLocationContext>());
 }
 
-/// Configures serving a static file by reading its content and setting up a handler.
 pub fn handle_set_static_file(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -126,7 +122,6 @@ pub fn handle_set_static_file(
     if file_path.is_empty() {
         return;
     }
-    println!("Setting static file path: {}", file_path);
     if let Some(ctx_ptr) = &ctx.current_ctx {
         if let Some(location_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ctx_ptr) {
             let content = Arc::new(
@@ -147,7 +142,6 @@ pub fn handle_set_static_file(
     }
 }
 
-/// Configures port forwarding by setting a handler that forwards requests to another server.
 pub fn handle_port_forward(
     ctx: &mut crate::core::config::config_context::ConfigContext,
     config: &Value,
@@ -157,14 +151,12 @@ pub fn handle_port_forward(
         return;
     }
 
-    println!("Setting port forward address: {}", forward_addr);
     if let Some(ctx_ptr) = &ctx.current_ctx {
         if let Some(location_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ctx_ptr) {
             let forward_addr = forward_addr.to_string();
             let handler = Box::new(move |req: &HttpRequest| {
                 let client = Client::new();
                 let url = format!("{}{}", forward_addr, req.path());
-                println!("Forwarding request to: {}", url);
                 let result = client.get(&url).send();
                 match result {
                     Ok(response) => {
@@ -203,14 +195,12 @@ impl HttpLocationContext {
         Self::default()
     }
 
-    /// Sets a handler for a specific status code.
     pub fn set_handler(&self, code: u16, handler: HttpHandlerFunction) {
         if let Ok(mut handlers) = self.handlers.lock() {
             handlers.insert(code, handler);
         }
     }
 
-    /// Extracts and clears all handlers.
     pub fn take_handlers(&self) -> HashMap<u16, HttpHandlerFunction> {
         let mut map = HashMap::new();
         if let Ok(mut handlers) = self.handlers.lock() {
