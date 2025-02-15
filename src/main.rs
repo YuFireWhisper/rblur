@@ -3,7 +3,9 @@ use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
+use rblur::core::config::command::CommandBuilder;
 use rblur::http::http_server::get_default_storage_path;
+use rblur::register_commands;
 use rblur::{core::config::config_loader, http::http_manager::HttpManager};
 use std::env;
 
@@ -21,6 +23,17 @@ struct Args {
     #[arg(short, long, value_name = "USE DEFAULT CONFIG")]
     use_default_config: bool,
 }
+
+register_commands!(
+    CommandBuilder::new("other")
+        .is_block()
+        .allowed_parents(vec!["root".to_string()])
+        .display_name("en", "Other")
+        .display_name("zh-tw", "其他")
+        .desc("en", "Other block")
+        .desc("zh-tw", "其他配置")
+        .build(|_, _| {}),
+);
 
 fn main() {
     let args = Args::parse();

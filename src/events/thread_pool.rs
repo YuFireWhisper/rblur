@@ -8,6 +8,116 @@ use std::{
 use once_cell::sync::Lazy;
 use thiserror::Error;
 
+use crate::{
+    core::config::{
+        command::{CommandBuilder, ParameterBuilder},
+        config_context::ConfigContext,
+        config_manager::get_config_param,
+    },
+    register_commands,
+};
+use serde_json::Value;
+
+register_commands!(
+    CommandBuilder::new("thread_pool_keep_alive")
+        .allowed_parents(vec!["root".to_string()])
+        .display_name("en", "Thread Pool Keep Alive")
+        .display_name("zh-tw", "執行緒池保活時間")
+        .desc(
+            "en",
+            "Sets the keep-alive duration for idle threads in the thread pool"
+        )
+        .desc("zh-tw", "設置執行緒池中閒置執行緒的保活時間")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Duration (seconds)")
+            .display_name("zh-tw", "時間 (秒)")
+            .type_name("Number")
+            .is_required(true)
+            .default("30")
+            .desc(
+                "en",
+                "Duration in seconds for how long idle threads should be kept alive"
+            )
+            .desc("zh-tw", "閒置執行緒應該保持活動的時間(秒)")
+            .build()])
+        .build(handle_thread_pool_keep_alive),
+    CommandBuilder::new("thread_pool_max_threads")
+        .allowed_parents(vec!["root".to_string()])
+        .display_name("en", "Thread Pool Maximum Threads")
+        .display_name("zh-tw", "執行緒池最大執行緒數")
+        .desc(
+            "en",
+            "Sets the maximum number of threads in the thread pool"
+        )
+        .desc("zh-tw", "設置執行緒池中的最大執行緒數量")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Thread Count")
+            .display_name("zh-tw", "執行緒數量")
+            .type_name("Number")
+            .is_required(true)
+            .default("8")
+            .desc("en", "Maximum number of threads that can exist in the pool")
+            .desc("zh-tw", "池中可以存在的最大執行緒數量")
+            .build()])
+        .build(handle_thread_pool_max_threads),
+    CommandBuilder::new("thread_pool_max_queue_size")
+        .allowed_parents(vec!["root".to_string()])
+        .display_name("en", "Thread Pool Maximum Queue Size")
+        .display_name("zh-tw", "執行緒池最大佇列大小")
+        .desc(
+            "en",
+            "Sets the maximum size of the task queue in the thread pool"
+        )
+        .desc("zh-tw", "設置執行緒池中任務佇列的最大大小")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Queue Size")
+            .display_name("zh-tw", "佇列大小")
+            .type_name("Number")
+            .is_required(true)
+            .default("10000")
+            .desc(
+                "en",
+                "Maximum number of tasks that can be queued (0 for unbounded)"
+            )
+            .desc("zh-tw", "可以排隊的最大任務數量 (0表示無限制)")
+            .build()])
+        .build(handle_thread_pool_max_queue_size)
+);
+
+pub fn handle_thread_pool_keep_alive(_ctx: &mut ConfigContext, config: &Value) {
+    if let Some(keep_alive) = get_config_param(config, 0) {
+        if let Ok(seconds) = keep_alive.parse::<u64>() {
+            if let Ok(mut pool) = crate::events::thread_pool::THREAD_POOL.lock() {
+                pool.keep_alive = Duration::from_secs(seconds);
+            }
+        }
+    }
+}
+
+pub fn handle_thread_pool_max_threads(_ctx: &mut ConfigContext, config: &Value) {
+    if let Some(max_threads) = get_config_param(config, 0) {
+        if let Ok(count) = max_threads.parse::<usize>() {
+            if let Ok(mut pool) = crate::events::thread_pool::THREAD_POOL.lock() {
+                println!("Setting thread pool max threads: {}", count);
+                pool.max_threads = count;
+            }
+        }
+    }
+}
+
+pub fn handle_thread_pool_max_queue_size(_ctx: &mut ConfigContext, config: &Value) {
+    if let Some(max_queue_size) = get_config_param(config, 0) {
+        if let Ok(size) = max_queue_size.parse::<usize>() {
+            if let Ok(mut pool) = crate::events::thread_pool::THREAD_POOL.lock() {
+                pool.max_queue_size = size;
+            }
+        }
+    }
+}
+
+pub static THREAD_POOL: Lazy<Mutex<ThreadPool>> =
+    Lazy::new(|| Mutex::new(ThreadPool::new(ThreadPoolConfig::new())));
+
 #[derive(Debug, Error)]
 pub enum ThreadPoolError {
     #[error("Thread pool task queue is full")]
@@ -52,9 +162,6 @@ pub struct ThreadPool {
     max_threads: usize,
     max_queue_size: usize,
 }
-
-pub static THREAD_POOL: Lazy<Mutex<ThreadPool>> =
-    Lazy::new(|| Mutex::new(ThreadPool::new(ThreadPoolConfig::new())));
 
 impl ThreadPool {
     pub fn new(config: ThreadPoolConfig) -> Self {
