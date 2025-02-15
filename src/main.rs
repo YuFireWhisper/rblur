@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::thread;
+use std::{fs, thread};
 use std::time::Duration;
 
 use clap::Parser;
@@ -38,7 +38,13 @@ register_commands!(
 
 fn main() {
     let args = Args::parse();
-    let storage_path = get_default_storage_path();
+    let storage_path = {
+        let path = get_default_storage_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        path
+    };
 
     let config_path = if args.use_default_config {
         let mut cargo_manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
