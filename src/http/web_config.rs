@@ -459,10 +459,12 @@ pub fn add_all_web_config_handlers(
     register_add_block_handler(&web_config, &mut proc_lock);
     register_delete_block_handler(&web_config, &mut proc_lock);
 
-    proc_lock.serve_file_at(
-        "/web_config/*",
-        format!("{}/static/dist/index.html", project_root),
-    ).expect("Failed to register /web_config/* mapping");
+    proc_lock
+        .serve_file_at(
+            "/web_config/*",
+            format!("{}/static/dist/index.html", project_root),
+        )
+        .expect("Failed to register /web_config/* mapping");
 }
 
 fn register_get_json_handler(
@@ -721,6 +723,27 @@ fn needs_update(static_dir: &Path) -> Result<bool, WebConfigError> {
     }
 
     println!("Static files found, checking git status");
+
+    let branch_name = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(static_dir)
+        .output()
+        .map_err(|e| {
+            WebConfigError::ValidationError(format!("Failed to get current branch: {}", e))
+        })?
+        .stdout;
+    let branch_name = String::from_utf8_lossy(&branch_name).trim().to_string();
+
+    let fetch_status = Command::new("git")
+        .args(["fetch", "origin"])
+        .current_dir(static_dir)
+        .status()
+        .map_err(|e| WebConfigError::ValidationError(format!("Failed to fetch: {}", e)))?;
+
+    if !fetch_status.success() {
+        return Err(WebConfigError::ValidationError("Git fetch failed".into()));
+    }
+
     let get_git_hash = |args: &[&str]| {
         Command::new("git")
             .args(args)
@@ -735,11 +758,16 @@ fn needs_update(static_dir: &Path) -> Result<bool, WebConfigError> {
             })
             .unwrap_or_default()
     };
+
     let head = get_git_hash(&["rev-parse", "HEAD"]);
-    let upstream = get_git_hash(&["rev-parse", "@{u}"]);
+    let upstream = if !branch_name.is_empty() {
+        get_git_hash(&["rev-parse", &format!("origin/{}", branch_name)])
+    } else {
+        String::new()
+    };
 
     if head.is_empty() || upstream.is_empty() {
-        println!("Git commands failed (possibly no upstream), forcing update.");
+        println!("Git commands failed (possibly detached HEAD or no upstream), forcing update.");
         return Ok(true);
     }
 
