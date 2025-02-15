@@ -1,6 +1,6 @@
 [package]
 name = "rblur"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "一個支援網頁配置介面的輕量級網頁伺服器"
 license = "MIT"
