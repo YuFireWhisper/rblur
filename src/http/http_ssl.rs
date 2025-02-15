@@ -1,4 +1,5 @@
 use std::{
+    path::Path,
     str::FromStr,
     sync::atomic::{AtomicPtr, Ordering},
     time::Duration,
@@ -76,7 +77,7 @@ register_commands!(
             .display_name("zh-tw", "電子郵件")
             .type_name("String")
             .is_required(true)
-            .default("example@example.com")
+            .default("")
             .desc(
                 "en",
                 "Email address used for SSL certificate registration and renewal notifications"
@@ -133,7 +134,7 @@ register_commands!(
             .display_name("zh-tw", "域名")
             .type_name("String")
             .is_required(true)
-            .default("example.com")
+            .default("")
             .desc("en", "Primary domain name for the SSL certificate")
             .desc("zh-tw", "SSL 憑證的主要網域名稱")
             .build()])
@@ -150,7 +151,7 @@ register_commands!(
                 .display_name("zh-tw", "供應商")
                 .type_name("String")
                 .is_required(true)
-                .default("cloudflare")
+                .default("")
                 .desc(
                     "en",
                     "Name of the DNS service provider for domain validation"
@@ -162,7 +163,7 @@ register_commands!(
                 .display_name("zh-tw", "API 令牌")
                 .type_name("String")
                 .is_required(true)
-                .default("token")
+                .default("")
                 .desc("en", "Authentication token for the specified DNS provider")
                 .desc("zh-tw", "指定 DNS 供應商的驗證令牌")
                 .build()
@@ -184,6 +185,38 @@ register_commands!(
             .desc("zh-tw", "用於呈現 DNS 設定說明的語言代碼")
             .build()])
         .build(handle_set_ssl_dns_instructions_lang),
+    CommandBuilder::new("ssl_cert")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL Certificate Path")
+        .display_name("zh-tw", "SSL 憑證路徑")
+        .desc("en", "Specifies the path to the SSL certificate file")
+        .desc("zh-tw", "指定 SSL 憑證檔案的路徑")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Path")
+            .display_name("zh-tw", "路徑")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "Path to the SSL certificate file")
+            .desc("zh-tw", "SSL 憑證檔案的路徑")
+            .build()])
+        .build(handle_set_ssl_cert),
+    CommandBuilder::new("ssl_key")
+        .allowed_parents(vec!["ssl".to_string()])
+        .display_name("en", "SSL Key Path")
+        .display_name("zh-tw", "SSL 金鑰路徑")
+        .desc("en", "Specifies the path to the SSL key file")
+        .desc("zh-tw", "指定 SSL 金鑰檔案的路徑")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Path")
+            .display_name("zh-tw", "路徑")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "Path to the SSL key file")
+            .desc("zh-tw", "SSL 金鑰檔案的路徑")
+            .build()])
+        .build(handle_set_ssl_key),
 );
 
 fn update_ssl_context<F>(ctx: &mut ConfigContext, update_fn: F)
@@ -289,6 +322,26 @@ pub fn handle_set_ssl_dns_instructions_lang(
     });
 }
 
+pub fn handle_set_ssl_cert(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let cert_path = get_config_param(config, 0).expect("Missing ssl_cert parameter");
+    update_ssl_context(ctx, |ssl_ctx| {
+        ssl_ctx.cert_path = cert_path.to_string();
+    });
+}
+
+pub fn handle_set_ssl_key(
+    ctx: &mut crate::core::config::config_context::ConfigContext,
+    config: &Value,
+) {
+    let key_path = get_config_param(config, 0).expect("Missing ssl_key parameter");
+    update_ssl_context(ctx, |ssl_ctx| {
+        ssl_ctx.key_path = key_path.to_string();
+    });
+}
+
 pub struct HttpSSLContext {
     pub ssl: bool,
     pub email: String,
@@ -298,6 +351,8 @@ pub struct HttpSSLContext {
     pub dns_provider: DnsProvider,
     pub dns_provider_api_token: String,
     pub dns_instructions_lang: String,
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 impl Default for HttpSSLContext {
@@ -311,6 +366,8 @@ impl Default for HttpSSLContext {
             dns_provider: DnsProvider::Default,
             dns_provider_api_token: String::new(),
             dns_instructions_lang: String::new(),
+            cert_path: String::new(),
+            key_path: String::new(),
         }
     }
 }
@@ -331,31 +388,81 @@ impl HttpSSL {
         if !ctx.ssl {
             return Err(HttpSSLError::SSLNotEnabled);
         }
-        if ctx.email.is_empty() {
-            return Err(HttpSSLError::EmailEmpty);
-        }
-        if ctx.domain.is_empty() {
-            return Err(HttpSSLError::DomainEmpty);
+
+        let (mut account, cert_key, mut cert) = if Self::is_custom(ctx) {
+            println!("Using custom certificate");
+            Self::use_custom(ctx)?
+        } else {
+            Self::use_default(ctx)?
+        };
+
+        if !ctx.auto_renew || !cert.should_renew(ctx.renew_days)? {
+            println!("Certificate is up to date");
+            println!("Certificate expires on: {}", String::from_utf8_lossy(&cert.cert.to_pem().unwrap()));
+            println!("Certificate key: {}", String::from_utf8_lossy(&cert_key.pri_key.private_key_to_pem_pkcs8().unwrap()));
+            return Ok(Self { cert_key, cert });
         }
 
-        let mut account = AccountBuilder::new(&ctx.email).build().unwrap();
+        if account.is_none() {
+            account = Some(Self::create_account(&ctx.email)?);
+        }
 
-        Self::init(&mut account, ctx, false)?;
+        Self::new_order(account.as_mut().unwrap(), ctx, true)?;
+        cert = account
+            .as_ref()
+            .unwrap()
+            .get_certificate(&ctx.domain)
+            .unwrap();
+
+        Ok(Self { cert_key, cert })
+    }
+
+    fn is_custom(ctx: &HttpSSLContext) -> bool {
+        let valid_file = |p: &Path| p.is_file();
+        let key_exists = valid_file(Path::new(&ctx.key_path));
+        let cert_exists = valid_file(Path::new(&ctx.cert_path));
+
+        if key_exists ^ cert_exists {
+            panic!("Key and certificate files must be both present or both absent");
+        }
+
+        key_exists && cert_exists
+    }
+
+    fn use_custom(ctx: &HttpSSLContext) -> Result<(Option<Account>, KeyPair, Certificate)> {
+        let cert_key = KeyPair::from_file(&ctx.key_path).expect("Failed to load certificate key");
+        let cert_pem =
+            std::fs::read_to_string(&ctx.cert_path).expect("Failed to read certificate file");
+        let cert = Certificate::new(&cert_pem)?;
+
+        Ok((None, cert_key, cert))
+    }
+
+    fn use_default(ctx: &HttpSSLContext) -> Result<(Option<Account>, KeyPair, Certificate)> {
+        let mut account = Self::create_account(&ctx.email)?;
+
+        Self::new_order(&mut account, ctx, false)?;
 
         let cert_key = account
             .get_cert_key(&ctx.domain)
             .expect("Failed to get certificate key");
-        let mut cert = account
+
+        let cert = account
             .get_certificate(&ctx.domain)
             .expect("Failed to get certificate");
 
-        if ctx.auto_renew && cert.should_renew(ctx.renew_days)? {
-            println!("Renewing SSL certificate for domain: {}", ctx.domain);
-            Self::init(&mut account, ctx, true)?;
-            cert = account.get_certificate(&ctx.domain).unwrap();
+        Ok((Some(account), cert_key, cert))
+    }
+
+    fn create_account(email: &str) -> Result<Account> {
+        if email.is_empty() {
+            return Err(HttpSSLError::EmailEmpty);
         }
 
-        Ok(Self { cert_key, cert })
+        AccountBuilder::new(email)
+            .dir_url("https://acme-staging-v02.api.letsencrypt.org/directory")
+            .build()
+            .map_err(|_| HttpSSLError::EmailEmpty)
     }
 
     pub fn from_config(ctx: &ConfigContext) -> Result<Self> {
@@ -368,7 +475,11 @@ impl HttpSSL {
         }
     }
 
-    fn init(account: &mut Account, ctx: &HttpSSLContext, renew: bool) -> Result<()> {
+    fn new_order(account: &mut Account, ctx: &HttpSSLContext, renew: bool) -> Result<()> {
+        if ctx.domain.is_empty() {
+            return Err(HttpSSLError::DomainEmpty);
+        }
+
         let mut order = if renew {
             Order::renew(account, &ctx.domain)?
                 .dns_provider(ctx.dns_provider, &ctx.dns_provider_api_token)?

@@ -124,10 +124,9 @@ pub fn handle_set_static_file(
     }
     if let Some(ctx_ptr) = &ctx.current_ctx {
         if let Some(location_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ctx_ptr) {
-            let content = Arc::new(
-                std::fs::read_to_string(&file_path)
-                    .expect("Failed to read static file"),
-            );
+            println!("Setting static file: {}", file_path);
+            let content =
+                Arc::new(std::fs::read_to_string(&file_path).expect("Failed to read static file"));
             let content_type = get_content_type(&file_path).to_string();
             let handler = Box::new(move |_req: &HttpRequest| {
                 println!("Serving static file: {}", file_path);
@@ -209,4 +208,3 @@ impl HttpLocationContext {
         map
     }
 }
-
