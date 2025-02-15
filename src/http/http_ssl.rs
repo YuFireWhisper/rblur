@@ -390,16 +390,12 @@ impl HttpSSL {
         }
 
         let (mut account, cert_key, mut cert) = if Self::is_custom(ctx) {
-            println!("Using custom certificate");
             Self::use_custom(ctx)?
         } else {
             Self::use_default(ctx)?
         };
 
         if !ctx.auto_renew || !cert.should_renew(ctx.renew_days)? {
-            println!("Certificate is up to date");
-            println!("Certificate expires on: {}", String::from_utf8_lossy(&cert.cert.to_pem().unwrap()));
-            println!("Certificate key: {}", String::from_utf8_lossy(&cert_key.pri_key.private_key_to_pem_pkcs8().unwrap()));
             return Ok(Self { cert_key, cert });
         }
 
@@ -460,7 +456,6 @@ impl HttpSSL {
         }
 
         AccountBuilder::new(email)
-            .dir_url("https://acme-staging-v02.api.letsencrypt.org/directory")
             .build()
             .map_err(|_| HttpSSLError::EmailEmpty)
     }
