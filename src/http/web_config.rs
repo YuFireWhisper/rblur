@@ -458,6 +458,11 @@ pub fn add_all_web_config_handlers(
     register_update_handler(&web_config, &mut proc_lock);
     register_add_block_handler(&web_config, &mut proc_lock);
     register_delete_block_handler(&web_config, &mut proc_lock);
+
+    proc_lock.serve_file_at(
+        "/web_config/*",
+        format!("{}/static/dist/index.html", project_root),
+    ).expect("Failed to register /web_config/* mapping");
 }
 
 fn register_get_json_handler(
