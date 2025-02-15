@@ -367,6 +367,11 @@ impl Processor for HttpProcessor {
             return Ok(response.as_bytes());
         }
 
+        if let Some(handler) = self.find_handler(&clean_path, &Method::OPTIONS) {
+            let response = handler(&req);
+            return Ok(response.as_bytes());
+        }
+
         if *method == Method::OPTIONS {
             let mut response = HttpResponse::new();
             response.set_status_line(*req.version(), StatusCode::OK);
