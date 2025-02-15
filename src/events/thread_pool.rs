@@ -20,7 +20,7 @@ use serde_json::Value;
 
 register_commands!(
     CommandBuilder::new("thread_pool_keep_alive")
-        .allowed_parents(vec!["root".to_string()])
+        .allowed_parents(vec!["other".to_string()])
         .display_name("en", "Thread Pool Keep Alive")
         .display_name("zh-tw", "執行緒池保活時間")
         .desc(
@@ -31,7 +31,7 @@ register_commands!(
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Duration (seconds)")
             .display_name("zh-tw", "時間 (秒)")
-            .type_name("Number")
+            .type_name("usize")
             .is_required(true)
             .default("30")
             .desc(
@@ -42,7 +42,7 @@ register_commands!(
             .build()])
         .build(handle_thread_pool_keep_alive),
     CommandBuilder::new("thread_pool_max_threads")
-        .allowed_parents(vec!["root".to_string()])
+        .allowed_parents(vec!["other".to_string()])
         .display_name("en", "Thread Pool Maximum Threads")
         .display_name("zh-tw", "執行緒池最大執行緒數")
         .desc(
@@ -53,7 +53,7 @@ register_commands!(
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Thread Count")
             .display_name("zh-tw", "執行緒數量")
-            .type_name("Number")
+            .type_name("usize")
             .is_required(true)
             .default("8")
             .desc("en", "Maximum number of threads that can exist in the pool")
@@ -61,7 +61,7 @@ register_commands!(
             .build()])
         .build(handle_thread_pool_max_threads),
     CommandBuilder::new("thread_pool_max_queue_size")
-        .allowed_parents(vec!["root".to_string()])
+        .allowed_parents(vec!["other".to_string()])
         .display_name("en", "Thread Pool Maximum Queue Size")
         .display_name("zh-tw", "執行緒池最大佇列大小")
         .desc(
@@ -72,7 +72,7 @@ register_commands!(
         .params(vec![ParameterBuilder::new(0)
             .display_name("en", "Queue Size")
             .display_name("zh-tw", "佇列大小")
-            .type_name("Number")
+            .type_name("usize")
             .is_required(true)
             .default("10000")
             .desc(

@@ -27,6 +27,7 @@ struct Args {
 register_commands!(
     CommandBuilder::new("other")
         .is_block()
+        .is_unique()
         .allowed_parents(vec!["root".to_string()])
         .display_name("en", "Other")
         .display_name("zh-tw", "其他")
@@ -51,7 +52,7 @@ fn main() {
     let root_ctx = match config_loader::load_config(
         storage_path.to_str().unwrap(),
         config_path.as_deref(),
-        vec!["http".to_string()],
+        vec!["http".to_string(), "other".to_string()],
     ) {
         Ok(ctx) => ctx,
         Err(e) => {
