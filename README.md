@@ -14,7 +14,8 @@ Ubuntu 環境下安裝：
 ```bash
 sudo apt update
 sudo apt install build-essential
-sudo apt-get install libssl-dev pkg-config
+sudo apt install libssl-dev pkg-config
+sudo apt install nodejs npm
 ```
 
 ### 使用Cargo安裝
@@ -75,5 +76,4 @@ Options:
   -h, --help                           顯示幫助訊息
   -V, --version                        顯示版本資訊
 ```
-
 
