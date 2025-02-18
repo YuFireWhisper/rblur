@@ -7,7 +7,7 @@ use std::{
 use http::{Method, Version};
 use url::form_urlencoded;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum ParseState {
     RequestLine,
     Headers,
@@ -22,7 +22,7 @@ impl Default for ParseState {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct HttpRequest {
     method: Method,
     path: String,
@@ -112,7 +112,11 @@ impl HttpRequest {
                 self.buffer.drain(..self.header_index + 2);
                 self.header_index = 0;
 
-                self.parse_state = if self.headers.contains_key("Content-Length") {
+                self.parse_state = if self
+                    .headers
+                    .keys()
+                    .any(|key| key.to_lowercase() == "content-length")
+                {
                     ParseState::Body
                 } else {
                     ParseState::Complete
@@ -143,8 +147,12 @@ impl HttpRequest {
     }
 
     fn parse_body(&mut self) -> io::Result<bool> {
-        let content_length: usize = match self.headers.get("Content-Length") {
-            Some(len) => len.parse().map_err(|_| {
+        let content_length: usize = match self
+            .headers
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "content-length")
+        {
+            Some((_, len)) => len.parse().map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "Invalid Content-Length")
             })?,
             None => {
