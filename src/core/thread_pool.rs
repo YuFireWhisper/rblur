@@ -87,7 +87,7 @@ register_commands!(
 pub fn handle_thread_pool_keep_alive(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(keep_alive) = get_config_param(config, 0) {
         if let Ok(seconds) = keep_alive.parse::<u64>() {
-            if let Ok(mut pool) = crate::events::thread_pool::THREAD_POOL.lock() {
+            if let Ok(mut pool) = THREAD_POOL.lock() {
                 pool.keep_alive = Duration::from_secs(seconds);
             }
         }
@@ -97,7 +97,7 @@ pub fn handle_thread_pool_keep_alive(_ctx: &mut ConfigContext, config: &Value) {
 pub fn handle_thread_pool_max_threads(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(max_threads) = get_config_param(config, 0) {
         if let Ok(count) = max_threads.parse::<usize>() {
-            if let Ok(mut pool) = crate::events::thread_pool::THREAD_POOL.lock() {
+            if let Ok(mut pool) = THREAD_POOL.lock() {
                 println!("Setting thread pool max threads: {}", count);
                 pool.max_threads = count;
             }
@@ -108,7 +108,7 @@ pub fn handle_thread_pool_max_threads(_ctx: &mut ConfigContext, config: &Value) 
 pub fn handle_thread_pool_max_queue_size(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(max_queue_size) = get_config_param(config, 0) {
         if let Ok(size) = max_queue_size.parse::<usize>() {
-            if let Ok(mut pool) = crate::events::thread_pool::THREAD_POOL.lock() {
+            if let Ok(mut pool) = THREAD_POOL.lock() {
                 pool.max_queue_size = size;
             }
         }

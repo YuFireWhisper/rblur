@@ -26,9 +26,8 @@ use crate::{
             config_context::ConfigContext,
             config_manager::{bool_str_to_bool, get_config_param},
         },
-        processor::{HttpProcessor, Processor},
+        processor::{HttpProcessor, Processor}, thread_pool::THREAD_POOL,
     },
-    events::thread_pool::THREAD_POOL,
     http::{http_ssl::HttpSSL, web_config},
     register_commands,
 };
