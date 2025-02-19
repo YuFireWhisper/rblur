@@ -1,13 +1,13 @@
 use std::{
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
     time::Duration,
 };
 
-use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use once_cell::sync::Lazy;
 use thiserror::Error;
 
@@ -91,7 +91,8 @@ pub fn handle_thread_pool_keep_alive(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(keep_alive) = get_config_param(config, 0) {
         if let Ok(seconds) = keep_alive.parse::<u64>() {
             if let Ok(pool) = THREAD_POOL.lock() {
-                pool.keep_alive.store(seconds, Ordering::Relaxed);
+                let mut ka = pool.keep_alive.lock().unwrap();
+                *ka = Duration::from_secs(seconds);
             }
         }
     }
@@ -101,7 +102,6 @@ pub fn handle_thread_pool_max_threads(_ctx: &mut ConfigContext, config: &Value) 
     if let Some(max_threads) = get_config_param(config, 0) {
         if let Ok(count) = max_threads.parse::<usize>() {
             if let Ok(pool) = THREAD_POOL.lock() {
-                println!("Setting thread pool max threads: {}", count);
                 pool.max_threads.store(count, Ordering::Relaxed);
             }
         }
@@ -111,15 +111,17 @@ pub fn handle_thread_pool_max_threads(_ctx: &mut ConfigContext, config: &Value) 
 pub fn handle_thread_pool_max_queue_size(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(max_queue_size) = get_config_param(config, 0) {
         if let Ok(size) = max_queue_size.parse::<usize>() {
-            if let Ok(mut pool) = THREAD_POOL.lock() {
-                pool.max_queue_size = size;
+            if let Ok(pool) = THREAD_POOL.lock() {
+                pool.max_queue_size.store(size, Ordering::Relaxed);
             }
         }
     }
 }
 
-pub static THREAD_POOL: Lazy<Mutex<ThreadPool>> =
-    Lazy::new(|| Mutex::new(ThreadPool::new(ThreadPoolConfig::new())));
+pub static THREAD_POOL: Lazy<Mutex<ThreadPool>> = Lazy::new(|| {
+    let config = ThreadPoolConfig::new();
+    Mutex::new(ThreadPool::new(config))
+});
 
 #[derive(Debug, Error)]
 pub enum ThreadPoolError {
@@ -128,9 +130,9 @@ pub enum ThreadPoolError {
 }
 
 pub struct ThreadPoolConfig {
-    pub keep_alive: Duration,
-    pub max_threads: usize,
-    pub max_queue_size: usize, // 0 表示無界
+    keep_alive: Duration,
+    max_threads: usize,
+    max_queue_size: usize,
 }
 
 impl Default for ThreadPoolConfig {
@@ -156,11 +158,11 @@ type Task = Box<dyn FnOnce() + Send + 'static>;
 pub struct ThreadPool {
     sender: Sender<Task>,
     receiver: Receiver<Task>,
-    workers: Mutex<Vec<thread::JoinHandle<()>>>,
-    worker_count: Arc<AtomicUsize>,
-    pub keep_alive: Arc<AtomicU64>,
-    pub max_threads: AtomicUsize,
-    pub max_queue_size: usize,
+    active_threads: Arc<AtomicUsize>,
+    max_threads: Arc<AtomicUsize>,
+    keep_alive: Arc<Mutex<Duration>>,
+    max_queue_size: Arc<AtomicUsize>,
+    handles: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
 }
 
 impl ThreadPool {
@@ -174,11 +176,11 @@ impl ThreadPool {
         Self {
             sender,
             receiver,
-            workers: Mutex::new(Vec::new()),
-            worker_count: Arc::new(AtomicUsize::new(0)),
-            keep_alive: Arc::new(AtomicU64::new(config.keep_alive.as_secs())),
-            max_threads: AtomicUsize::new(config.max_threads),
-            max_queue_size: config.max_queue_size,
+            active_threads: Arc::new(AtomicUsize::new(0)),
+            max_threads: Arc::new(AtomicUsize::new(config.max_threads)),
+            keep_alive: Arc::new(Mutex::new(config.keep_alive)),
+            max_queue_size: Arc::new(AtomicUsize::new(config.max_queue_size)),
+            handles: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -187,54 +189,69 @@ impl ThreadPool {
         F: FnOnce() + Send + 'static,
     {
         let task = Box::new(f);
-        self.sender.try_send(task).map_err(|err| {
-            if err.is_full() {
-                ThreadPoolError::QueueFull
-            } else {
-                // 其他錯誤一併回傳 QueueFull
-                ThreadPoolError::QueueFull
-            }
-        })?;
 
-        let queued = self.receiver.len();
-        let current_workers = self.worker_count.load(Ordering::Acquire);
-        let max_threads = self.max_threads.load(Ordering::Acquire);
-        if queued > current_workers && current_workers < max_threads {
-            self.spawn_worker();
+        let current_max_queue_size = self.max_queue_size.load(Ordering::Relaxed);
+        if current_max_queue_size > 0 {
+            if let Err(TrySendError::Full(_)) = self.sender.try_send(task) {
+                return Err(ThreadPoolError::QueueFull);
+            }
+        } else {
+            self.sender
+                .send(task)
+                .map_err(|_| ThreadPoolError::QueueFull)?;
         }
+
+        let current_max_threads = self.max_threads.load(Ordering::Relaxed);
+        loop {
+            let current_active = self.active_threads.load(Ordering::Relaxed);
+            if current_active >= current_max_threads {
+                break;
+            }
+
+            if self
+                .active_threads
+                .compare_exchange_weak(
+                    current_active,
+                    current_active + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                let receiver = self.receiver.clone();
+                let keep_alive = *self.keep_alive.lock().unwrap();
+                let active_threads = self.active_threads.clone();
+                let handles = self.handles.clone();
+
+                let handle = thread::spawn(move || loop {
+                    match receiver.recv_timeout(keep_alive) {
+                        Ok(task) => {
+                            task();
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            active_threads.fetch_sub(1, Ordering::AcqRel);
+                            break;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            active_threads.fetch_sub(1, Ordering::AcqRel);
+                            break;
+                        }
+                    }
+                });
+
+                handles.lock().unwrap().push(handle);
+                break;
+            }
+        }
+
         Ok(())
-    }
-
-    fn spawn_worker(&self) {
-        let max_threads = self.max_threads.load(Ordering::Acquire);
-        let current = self.worker_count.fetch_add(1, Ordering::AcqRel);
-        if current >= max_threads {
-            self.worker_count.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        let receiver = self.receiver.clone();
-        let keep_alive = Arc::clone(&self.keep_alive);
-        let worker_count = Arc::clone(&self.worker_count);
-        let handle = thread::spawn(move || loop {
-            let timeout = Duration::from_secs(keep_alive.load(Ordering::Relaxed));
-            match receiver.recv_timeout(timeout) {
-                Ok(task) => {
-                    task();
-                }
-                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
-                    worker_count.fetch_sub(1, Ordering::AcqRel);
-                    break;
-                }
-            }
-        });
-        self.workers.lock().unwrap().push(handle);
     }
 }
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        let mut workers = self.workers.lock().unwrap();
-        while let Some(handle) = workers.pop() {
+        let mut handles = self.handles.lock().unwrap();
+        for handle in handles.drain(..) {
             let _ = handle.join();
         }
     }
