@@ -1,10 +1,13 @@
 use std::{
-    collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use once_cell::sync::Lazy;
 use thiserror::Error;
 
@@ -87,8 +90,8 @@ register_commands!(
 pub fn handle_thread_pool_keep_alive(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(keep_alive) = get_config_param(config, 0) {
         if let Ok(seconds) = keep_alive.parse::<u64>() {
-            if let Ok(mut pool) = THREAD_POOL.lock() {
-                pool.keep_alive = Duration::from_secs(seconds);
+            if let Ok(pool) = THREAD_POOL.lock() {
+                pool.keep_alive.store(seconds, Ordering::Relaxed);
             }
         }
     }
@@ -97,9 +100,9 @@ pub fn handle_thread_pool_keep_alive(_ctx: &mut ConfigContext, config: &Value) {
 pub fn handle_thread_pool_max_threads(_ctx: &mut ConfigContext, config: &Value) {
     if let Some(max_threads) = get_config_param(config, 0) {
         if let Ok(count) = max_threads.parse::<usize>() {
-            if let Ok(mut pool) = THREAD_POOL.lock() {
+            if let Ok(pool) = THREAD_POOL.lock() {
                 println!("Setting thread pool max threads: {}", count);
-                pool.max_threads = count;
+                pool.max_threads.store(count, Ordering::Relaxed);
             }
         }
     }
@@ -127,7 +130,7 @@ pub enum ThreadPoolError {
 pub struct ThreadPoolConfig {
     pub keep_alive: Duration,
     pub max_threads: usize,
-    pub max_queue_size: usize, // 0 則為無界
+    pub max_queue_size: usize, // 0 表示無界
 }
 
 impl Default for ThreadPoolConfig {
@@ -150,26 +153,31 @@ impl ThreadPoolConfig {
 
 type Task = Box<dyn FnOnce() + Send + 'static>;
 
-struct Worker {
-    last_active: Instant,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
 pub struct ThreadPool {
-    tasks: Arc<(Mutex<VecDeque<Task>>, Condvar)>,
-    workers: Arc<Mutex<Vec<Worker>>>,
-    keep_alive: Duration,
-    max_threads: usize,
-    max_queue_size: usize,
+    sender: Sender<Task>,
+    receiver: Receiver<Task>,
+    workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    worker_count: Arc<AtomicUsize>,
+    pub keep_alive: Arc<AtomicU64>,
+    pub max_threads: AtomicUsize,
+    pub max_queue_size: usize,
 }
 
 impl ThreadPool {
     pub fn new(config: ThreadPoolConfig) -> Self {
+        let (sender, receiver) = if config.max_queue_size == 0 {
+            unbounded()
+        } else {
+            bounded(config.max_queue_size)
+        };
+
         Self {
-            tasks: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-            workers: Arc::new(Mutex::new(Vec::new())),
-            keep_alive: config.keep_alive,
-            max_threads: config.max_threads,
+            sender,
+            receiver,
+            workers: Mutex::new(Vec::new()),
+            worker_count: Arc::new(AtomicUsize::new(0)),
+            keep_alive: Arc::new(AtomicU64::new(config.keep_alive.as_secs())),
+            max_threads: AtomicUsize::new(config.max_threads),
             max_queue_size: config.max_queue_size,
         }
     }
@@ -179,93 +187,55 @@ impl ThreadPool {
         F: FnOnce() + Send + 'static,
     {
         let task = Box::new(f);
-        let (lock, cvar) = &*self.tasks;
-        let mut queue = lock.lock().unwrap();
-        // 當 max_queue_size 為 0 時，視為無界，不檢查長度
-        if self.max_queue_size != 0 && queue.len() >= self.max_queue_size {
-            return Err(ThreadPoolError::QueueFull);
-        }
-        queue.push_back(task);
-        let task_count = queue.len();
-        drop(queue);
+        self.sender.try_send(task).map_err(|err| {
+            if err.is_full() {
+                ThreadPoolError::QueueFull
+            } else {
+                // 其他錯誤一併回傳 QueueFull
+                ThreadPoolError::QueueFull
+            }
+        })?;
 
-        let mut workers_guard = self.workers.lock().unwrap();
-        workers_guard.retain(|w| w.thread.is_some());
-        let active_count = workers_guard.len();
-        if task_count > active_count && active_count < self.max_threads {
-            drop(workers_guard);
+        let queued = self.receiver.len();
+        let current_workers = self.worker_count.load(Ordering::Acquire);
+        let max_threads = self.max_threads.load(Ordering::Acquire);
+        if queued > current_workers && current_workers < max_threads {
             self.spawn_worker();
-        } else {
-            drop(workers_guard);
         }
-
-        cvar.notify_one();
-
         Ok(())
     }
 
-    pub fn spawn_worker(&self) {
-        let workers = Arc::clone(&self.workers);
-        let tasks = Arc::clone(&self.tasks);
-        let keep_alive = self.keep_alive;
-
-        let worker_id = {
-            let mut workers = workers.lock().unwrap();
-            let id = workers.len();
-            workers.push(Worker {
-                last_active: Instant::now(),
-                thread: None,
-            });
-            id
-        };
-
-        let thread = thread::spawn(move || {
-            let (lock, cvar) = &*tasks;
-
-            loop {
-                let queue = lock.lock().unwrap();
-
-                let result = cvar
-                    .wait_timeout_while(queue, keep_alive, |queue| queue.is_empty())
-                    .unwrap();
-
-                let (mut queue, timeout) = result;
-
-                if timeout.timed_out() && queue.is_empty() {
-                    let mut workers = workers.lock().unwrap();
-                    if let Some(worker) = workers.get_mut(worker_id) {
-                        worker.thread = None;
-                    }
-                    break;
-                }
-
-                if let Some(task) = queue.pop_front() {
-                    let mut workers = workers.lock().unwrap();
-                    if let Some(worker) = workers.get_mut(worker_id) {
-                        worker.last_active = Instant::now();
-                    }
-                    drop(queue);
-
+    fn spawn_worker(&self) {
+        let max_threads = self.max_threads.load(Ordering::Acquire);
+        let current = self.worker_count.fetch_add(1, Ordering::AcqRel);
+        if current >= max_threads {
+            self.worker_count.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        let receiver = self.receiver.clone();
+        let keep_alive = Arc::clone(&self.keep_alive);
+        let worker_count = Arc::clone(&self.worker_count);
+        let handle = thread::spawn(move || loop {
+            let timeout = Duration::from_secs(keep_alive.load(Ordering::Relaxed));
+            match receiver.recv_timeout(timeout) {
+                Ok(task) => {
                     task();
+                }
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                    worker_count.fetch_sub(1, Ordering::AcqRel);
+                    break;
                 }
             }
         });
-
-        let mut workers = self.workers.lock().unwrap();
-        if let Some(worker) = workers.get_mut(worker_id) {
-            worker.thread = Some(thread);
-        }
+        self.workers.lock().unwrap().push(handle);
     }
 }
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        if let Ok(mut workers) = self.workers.lock() {
-            for worker in workers.iter_mut() {
-                if let Some(thread) = worker.thread.take() {
-                    thread.join().unwrap();
-                }
-            }
+        let mut workers = self.workers.lock().unwrap();
+        while let Some(handle) = workers.pop() {
+            let _ = handle.join();
         }
     }
 }
