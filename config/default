@@ -1,0 +1,11 @@
+http {
+  server {
+    listen 0.0.0.0:8080;
+
+    location / {
+      static_file ../index.html;
+    }
+
+    web_config on;
+  }
+}

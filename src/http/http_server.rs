@@ -1,11 +1,13 @@
 use http::{Method, StatusCode, Version};
 use rustls::pki_types::pem::PemObject;
+use serde_json::Value;
 use std::{
-    any::TypeId,
+    env,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicPtr, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -20,107 +22,149 @@ use rustls::{
 use crate::{
     core::{
         config::{
-            command::Command, config_context::ConfigContext, config_manager::bool_str_to_bool,
-            storage::get_default_storage_path,
+            command::{CommandBuilder, ParameterBuilder},
+            config_context::ConfigContext,
+            config_manager::{bool_str_to_bool, get_config_param},
         },
-        processor::{HttpProcessor, Processor},
+        processor::{HttpProcessor, Processor}, thread_pool::THREAD_POOL,
     },
-    events::thread_pool::THREAD_POOL,
-    http::{http_manager::HttpContext, http_ssl::HttpSSL, web_config},
+    http::{http_ssl::HttpSSL, web_config},
     register_commands,
 };
 
 use super::{http_location::HttpLocationContext, web_config::WebConfig};
 
 register_commands!(
-    Command::new(
-        "server",
-        vec![TypeId::of::<HttpContext>()],
-        handle_create_server,
-    ),
-    Command::new(
-        "listen",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_set_listen
-    ),
-    Command::new(
-        "server_name",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_set_server_name
-    ),
-    Command::new(
-        "web_config",
-        vec![TypeId::of::<HttpServerContext>()],
-        handle_web_config
-    ),
+    CommandBuilder::new("server")
+        .is_block()
+        .allowed_parents(vec!["http".to_string()])
+        .display_name("en", "Server")
+        .display_name("zh-tw", "伺服器")
+        .desc(
+            "en",
+            "Creates a new server configuration block within the HTTP context"
+        )
+        .desc("zh-tw", "在 HTTP 上下文中建立新的伺服器配置區塊")
+        .build(handle_create_server),
+    CommandBuilder::new("listen")
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Listen Address")
+        .display_name("zh-tw", "監聽位址")
+        .desc(
+            "en",
+            "Configures the network interface and port for server connections"
+        )
+        .desc("zh-tw", "配置伺服器連線的網路介面和埠號")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Address")
+            .display_name("zh-tw", "監聽位址")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc(
+                "en",
+                "Network interface IP address and port number for server to accept connections"
+            )
+            .desc("zh-tw", "伺服器接受連線的網路介面 IP 位址和埠號")
+            .build()])
+        .build(handle_set_listen),
+    CommandBuilder::new("server_name")
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Server Name")
+        .display_name("zh-tw", "伺服器名稱")
+        .desc("en", "Assigns a name to identify the server configuration")
+        .desc("zh-tw", "為伺服器配置指定識別名稱")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Name")
+            .display_name("zh-tw", "伺服器名稱")
+            .type_name("String")
+            .is_required(true)
+            .default("")
+            .desc("en", "Unique identifier for the server configuration")
+            .desc("zh-tw", "伺服器配置的唯一識別名稱")
+            .build()])
+        .build(handle_set_server_name),
+    CommandBuilder::new("web_config")
+        .allowed_parents(vec!["server".to_string()])
+        .display_name("en", "Web Config")
+        .display_name("zh-tw", "網頁配置功能")
+        .desc(
+            "en",
+            "Enables or disables web-based configuration for the server"
+        )
+        .desc("zh-tw", "啟用或停用伺服器的網頁配置功能")
+        .params(vec![ParameterBuilder::new(0)
+            .display_name("en", "Enable")
+            .display_name("zh-tw", "網頁配置")
+            .type_name("bool")
+            .is_required(true)
+            .default("true")
+            .desc("en", "Toggles web configuration interface on or off")
+            .desc("zh-tw", "開啟或關閉網頁配置介面")
+            .build()])
+        .build(handle_web_config)
 );
 
-/// 建立 Server 區塊時建立 HttpServerContext，並順便初始化 processor
-pub fn handle_create_server(ctx: &mut ConfigContext) {
-    println!("Creating server");
+fn clone_arc_from_atomic_ptr<T>(atomic_ptr: &AtomicPtr<u8>) -> Option<Arc<T>> {
+    let raw = atomic_ptr.load(Ordering::SeqCst) as *const T;
+    if raw.is_null() {
+        None
+    } else {
+        unsafe {
+            Arc::increment_strong_count(raw);
+            Some(Arc::from_raw(raw))
+        }
+    }
+}
+
+pub fn handle_create_server(ctx: &mut ConfigContext, _config: &Value) {
     let server_ctx = Arc::new(HttpServerContext::new());
-    let server_raw = Arc::into_raw(server_ctx.clone()) as *mut u8;
-    ctx.current_ctx = Some(atomic_ptr_new(server_raw));
-    ctx.current_block_type_id = Some(TypeId::of::<HttpServerContext>());
+    let raw_ptr = Arc::into_raw(server_ctx.clone()) as *mut u8;
+    ctx.current_ctx = Some(AtomicPtr::new(raw_ptr));
+    ctx.current_block_type_id = Some(std::any::TypeId::of::<HttpServerContext>());
 }
 
-/// 處理 listen 指令，設定伺服器監聽的位址
-pub fn handle_set_listen(ctx: &mut ConfigContext) {
-    let listen = ctx.current_cmd_args.first().unwrap();
-    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        if !srv_ptr.is_null() {
-            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.set_listen(listen);
+pub fn handle_set_listen(ctx: &mut ConfigContext, config: &Value) {
+    let listen = get_config_param(config, 0).expect("Missing listen parameter");
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(server_ctx) = clone_arc_from_atomic_ptr::<HttpServerContext>(ctx_ptr) {
+            server_ctx.set_listen(&listen);
         }
     }
 }
 
-/// 處理 server_name 指令，將伺服器名稱登錄到配置中
-pub fn handle_set_server_name(ctx: &mut ConfigContext) {
-    let server_name = ctx.current_cmd_args.first().unwrap();
-    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        if !srv_ptr.is_null() {
-            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
-            srv_ctx.add_server_name(server_name);
+pub fn handle_set_server_name(ctx: &mut ConfigContext, config: &Value) {
+    let server_name = get_config_param(config, 0).expect("Missing server_name parameter");
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(server_ctx) = clone_arc_from_atomic_ptr::<HttpServerContext>(ctx_ptr) {
+            server_ctx.add_server_name(&server_name);
         }
     }
 }
 
-pub fn handle_web_config(ctx: &mut ConfigContext) {
-    let flag = ctx.current_cmd_args[0].clone();
-
+pub fn handle_web_config(ctx: &mut ConfigContext, config: &Value) {
+    let flag = get_config_param(config, 0).expect("Missing web_config parameter");
     if !bool_str_to_bool(&flag).expect("Invalid web_config value") {
         return;
     }
-
-    if let Some(srv_ctx_ptr) = &ctx.current_ctx {
-        let srv_ptr = srv_ctx_ptr.load(Ordering::SeqCst);
-        if !srv_ptr.is_null() {
-            let srv_ctx = unsafe { &mut *(srv_ptr as *mut HttpServerContext) };
+    if let Some(ctx_ptr) = &ctx.current_ctx {
+        if let Some(server_ctx) = clone_arc_from_atomic_ptr::<HttpServerContext>(ctx_ptr) {
             let storage_path = get_default_storage_path();
-            let web_config = WebConfig::new(&storage_path);
-
-            if let Ok(mut web_config_lock) = srv_ctx.web_config.lock() {
+            let web_config = WebConfig::new(&storage_path).expect("Failed to create web config");
+            if let Ok(mut web_config_lock) = server_ctx.web_config.lock() {
                 *web_config_lock = Some(Arc::new(web_config));
             }
         }
     }
 }
 
-fn atomic_ptr_new<T>(ptr: *mut T) -> std::sync::atomic::AtomicPtr<u8> {
-    std::sync::atomic::AtomicPtr::new(ptr as *mut u8)
-}
-
-/// HttpServerContext 保存伺服器配置，包括監聽位址、伺服器名稱與 processor
 #[derive(Default)]
 pub struct HttpServerContext {
     listen: Mutex<String>,
     server_names: Mutex<Vec<String>>,
     http_version: Mutex<Version>,
     processor: Mutex<HttpProcessor>,
-    web_config: Mutex<Option<Arc<WebConfig>>>,
+    pub web_config: Mutex<Option<Arc<WebConfig>>>,
 }
 
 impl HttpServerContext {
@@ -155,7 +199,6 @@ impl HttpServerContext {
     }
 }
 
-/// 代表最終運行的 HTTP 伺服器，持有 Processor 處理請求
 pub struct HttpServer {
     listener: TcpListener,
     http_version: Arc<Version>,
@@ -165,52 +208,48 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    /// 根據配置建立 HttpServer，主要步驟：
-    /// 1. 從 ConfigContext 中取得 HttpServerContext
-    /// 2. 遍歷所有子區塊（例如 location），從中提取各路由的處理器，登錄到 processor 中
-    /// 3. 將 processor 從 HttpServerContext 中取出，並建立 Server
     pub fn new(server_config: &ConfigContext) -> Self {
-        // 取得 server 區塊的 HttpServerContext
-        let server_arc: Arc<HttpServerContext> = if let Some(ptr) = &server_config.current_ctx {
-            let srv_raw = ptr.load(Ordering::SeqCst);
-            unsafe { Arc::from_raw(srv_raw as *const HttpServerContext) }
+        let server_ctx_arc: Arc<HttpServerContext> = if let Some(ptr) = &server_config.current_ctx {
+            let raw = ptr.load(Ordering::SeqCst);
+            unsafe {
+                Arc::increment_strong_count(raw as *const HttpServerContext);
+                Arc::from_raw(raw as *const HttpServerContext)
+            }
         } else {
             panic!("Server block missing HttpServerContext");
         };
-        let server_ctx = server_arc.clone();
-        std::mem::forget(server_arc);
+
+        let server_ctx = server_ctx_arc.clone();
+        std::mem::forget(server_ctx_arc);
 
         let listen = server_ctx.listen();
         println!("Listening on: {}", listen);
 
         let mut ssl_config: Option<Arc<ServerConfig>> = None;
 
-        // 處理所有子區塊
         for child in &server_config.children {
             match child.block_name.trim() {
                 "location" => {
-                    // location 區塊第一個參數即為路徑
                     let path = child
                         .block_args
                         .first()
                         .expect("location block must have a path")
                         .clone();
                     if let Some(ptr) = &child.current_ctx {
-                        let loc_raw = ptr.load(Ordering::SeqCst);
-                        let loc_arc: Arc<HttpLocationContext> =
-                            unsafe { Arc::from_raw(loc_raw as *const HttpLocationContext) };
-                        let handlers = loc_arc.take_handlers();
-                        for (code, handler) in handlers {
-                            if let Ok(mut proc_lock) = server_ctx.processor.lock() {
-                                proc_lock.add_handler(
-                                    path.clone(),
-                                    StatusCode::from_u16(code).unwrap(),
-                                    &Method::OPTIONS,
-                                    handler,
-                                );
+                        if let Some(loc_ctx) = clone_arc_from_atomic_ptr::<HttpLocationContext>(ptr)
+                        {
+                            let handlers = loc_ctx.take_handlers();
+                            for (code, handler) in handlers {
+                                if let Ok(mut proc_lock) = server_ctx.processor.lock() {
+                                    proc_lock.add_handler(
+                                        path.clone(),
+                                        StatusCode::from_u16(code).unwrap(),
+                                        &Method::OPTIONS,
+                                        handler,
+                                    );
+                                }
                             }
                         }
-                        std::mem::forget(loc_arc);
                     }
                 }
                 "ssl" => {
@@ -256,8 +295,6 @@ impl HttpServer {
 
         let listener = TcpListener::bind(&listen).unwrap();
         let http_version = Arc::new(server_ctx.get_http_version());
-
-        println!("SSL enabled: {}", ssl_config.is_some());
 
         Self {
             listener,
@@ -325,11 +362,12 @@ fn process_connection(
 ) {
     if let Ok(pool) = THREAD_POOL.lock() {
         let _ = pool.spawn(move || {
-            if let Err(e) = if let Some(ssl_cfg) = ssl_config {
+            let result = if let Some(ssl_cfg) = ssl_config {
                 process_tls_connection(stream, ssl_cfg, &processor, &http_version)
             } else {
                 process_plain_connection(stream, &processor, &http_version)
-            } {
+            };
+            if let Err(e) = result {
                 eprintln!("Error handling connection: {}", e);
             }
         });
@@ -360,7 +398,6 @@ fn process_tls_connection(
     handle_connection(&mut tls_stream, processor, http_version)
 }
 
-/// 處理單一連線：讀取請求，透過 processor 產生回應
 fn handle_connection<S: Read + Write>(
     stream: &mut S,
     processor: &HttpProcessor,
@@ -373,7 +410,6 @@ fn handle_connection<S: Read + Write>(
     }
     let request_bytes = buffer[..n].to_vec();
 
-    // 呼叫 processor 處理請求
     let response_bytes = match processor.process(request_bytes) {
         Ok(resp) => resp,
         Err(_) => HttpProcessor::create_404_response(http_version).as_bytes(),
@@ -382,4 +418,17 @@ fn handle_connection<S: Read + Write>(
     stream.write_all(&response_bytes)?;
     stream.flush()?;
     Ok(())
+}
+
+pub fn get_default_storage_path() -> PathBuf {
+    let app_name = env!("CARGO_PKG_NAME");
+
+    #[cfg(target_os = "linux")]
+    {
+        let base_dir = env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/lib"));
+
+        base_dir.join(".local/share").join(app_name)
+    }
 }

@@ -16,7 +16,12 @@ impl HttpResponse {
 
     pub fn set_status_line(&mut self, version: Version, status_code: StatusCode) -> &mut Self {
         let message = status_code.canonical_reason().unwrap();
-        self.status_line = format!("{} {} {}", http_version_to_string(&version), status_code, message);
+        self.status_line = format!(
+            "{} {} {}\r\n",
+            http_version_to_string(&version),
+            status_code,
+            message
+        );
 
         self
     }

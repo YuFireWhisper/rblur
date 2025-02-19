@@ -18,9 +18,9 @@ pub struct ConfigContext {
 }
 
 impl ConfigContext {
-    pub fn new_empty(block_name: String, args: Vec<String>) -> Self {
+    pub fn new_empty(block_name: &str, args: Vec<String>) -> Self {
         ConfigContext {
-            block_name,
+            block_name: block_name.to_string(),
             block_args: args,
             current_cmd_name: String::new(),
             current_cmd_args: Vec::new(),
