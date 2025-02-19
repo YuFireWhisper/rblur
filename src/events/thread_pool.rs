@@ -181,7 +181,8 @@ impl ThreadPool {
         let task = Box::new(f);
         let (lock, cvar) = &*self.tasks;
         let mut queue = lock.lock().unwrap();
-        if queue.len() >= self.max_queue_size {
+        // 當 max_queue_size 為 0 時，視為無界，不檢查長度
+        if self.max_queue_size != 0 && queue.len() >= self.max_queue_size {
             return Err(ThreadPoolError::QueueFull);
         }
         queue.push_back(task);
