@@ -58,9 +58,15 @@ register_commands!(
             .display_name("zh-tw", "執行緒數量")
             .type_name("usize")
             .is_required(true)
-            .default("8")
-            .desc("en", "Maximum number of threads that can exist in the pool")
-            .desc("zh-tw", "池中可以存在的最大執行緒數量")
+            .default("0")
+            .desc(
+                "en", 
+                "Maximum number of threads that can exist in the pool (0 for automatic scaling based on CPU cores)"
+            )
+            .desc(
+                "zh-tw", 
+                "池中可以存在的最大執行緒數量 (0表示根據CPU核心數自動調整)"
+            )
             .build()])
         .build(handle_thread_pool_max_threads),
     CommandBuilder::new("thread_pool_max_queue_size")
@@ -145,9 +151,7 @@ impl ThreadPoolConfig {
     pub fn new() -> Self {
         Self {
             keep_alive: Duration::from_secs(30),
-            max_threads: std::thread::available_parallelism()
-                .map(|n| n.get() * 2)
-                .unwrap_or(8),
+            max_threads: 0,
             max_queue_size: 10000,
         }
     }
@@ -184,6 +188,17 @@ impl ThreadPool {
         }
     }
 
+    fn get_max_threads(&self) -> usize {
+        let configured_max = self.max_threads.load(Ordering::Relaxed);
+        if configured_max == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            configured_max
+        }
+    }
+
     pub fn spawn<F>(&self, f: F) -> Result<(), ThreadPoolError>
     where
         F: FnOnce() + Send + 'static,
@@ -201,7 +216,7 @@ impl ThreadPool {
                 .map_err(|_| ThreadPoolError::QueueFull)?;
         }
 
-        let current_max_threads = self.max_threads.load(Ordering::Relaxed);
+        let current_max_threads = self.get_max_threads();
         loop {
             let current_active = self.active_threads.load(Ordering::Relaxed);
             if current_active >= current_max_threads {
